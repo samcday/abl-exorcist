@@ -1,0 +1,13 @@
+[workspace]
+members = ["abl-exorcist", "abl-exorcist-assembler"]
+resolver = "3"
+
+[workspace.package]
+license = "GPL-3.0-only"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+panic = "abort"
+strip = "symbols"
