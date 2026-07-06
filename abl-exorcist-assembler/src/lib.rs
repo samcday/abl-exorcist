@@ -5,11 +5,31 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
+#[cfg(feature = "std")]
+use std::io::Read;
+
 const ARM64_IMAGE_MIN_SIZE: usize = 64;
 const ARM64_IMAGE_SIZE_OFFSET: usize = 16;
 const ARM64_IMAGE_MAGIC_OFFSET: usize = 56;
 const ARM64_IMAGE_MAGIC: &[u8; 4] = b"ARM\x64";
 const PAYLOAD_ALIGN: u64 = 0x20_0000;
+
+#[cfg(feature = "std")]
+const GZIP_MAGIC: &[u8; 2] = b"\x1f\x8b";
+#[cfg(feature = "std")]
+const ZSTD_MAGIC: &[u8; 4] = b"\x28\xb5\x2f\xfd";
+#[cfg(feature = "std")]
+const LINUX_ZBOOT_MIN_SIZE: usize = 28;
+#[cfg(feature = "std")]
+const LINUX_ZBOOT_IMAGE_TYPE_OFFSET: usize = 4;
+#[cfg(feature = "std")]
+const LINUX_ZBOOT_PAYLOAD_OFFSET_OFFSET: usize = 8;
+#[cfg(feature = "std")]
+const LINUX_ZBOOT_PAYLOAD_SIZE_OFFSET: usize = 12;
+#[cfg(feature = "std")]
+const LINUX_ZBOOT_COMP_TYPE_OFFSET: usize = 24;
+#[cfg(feature = "std")]
+const LINUX_ZBOOT_COMP_TYPE_MAX_LEN: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ImageKind {
@@ -71,6 +91,89 @@ impl fmt::Display for AssembleError {
 #[cfg(feature = "std")]
 impl std::error::Error for AssembleError {}
 
+#[cfg(feature = "std")]
+#[derive(Debug)]
+pub enum KernelImageError {
+    InvalidImage(AssembleError),
+    InvalidGzip(std::io::Error),
+    InvalidZstd(std::io::Error),
+    ZbootTooSmall {
+        size: usize,
+    },
+    ZbootPayloadOutOfBounds {
+        payload_offset: usize,
+        payload_size: usize,
+        image_size: usize,
+    },
+    UnsupportedZbootCompression(String),
+    SizeOverflow(&'static str),
+}
+
+#[cfg(feature = "std")]
+impl fmt::Display for KernelImageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidImage(err) => write!(f, "{err}"),
+            Self::InvalidGzip(err) => write!(f, "decompress gzip kernel image: {err}"),
+            Self::InvalidZstd(err) => write!(f, "decompress zstd kernel image: {err}"),
+            Self::ZbootTooSmall { size } => {
+                write!(
+                    f,
+                    "Linux EFI zboot image is too small: {size} < {LINUX_ZBOOT_MIN_SIZE}"
+                )
+            }
+            Self::ZbootPayloadOutOfBounds {
+                payload_offset,
+                payload_size,
+                image_size,
+            } => write!(
+                f,
+                "Linux EFI zboot payload extends beyond image: offset 0x{payload_offset:x} + size 0x{payload_size:x} > 0x{image_size:x}"
+            ),
+            Self::UnsupportedZbootCompression(compression) => write!(
+                f,
+                "unsupported Linux EFI zboot compression type: {compression}"
+            ),
+            Self::SizeOverflow(description) => write!(f, "{description} overflows usize"),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for KernelImageError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidImage(err) => Some(err),
+            Self::InvalidGzip(err) | Self::InvalidZstd(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+pub fn canonicalize_kernel(kernel: &[u8]) -> Result<Vec<u8>, KernelImageError> {
+    if is_arm64_image(kernel) {
+        verify_kernel(kernel)?;
+        return Ok(kernel.to_vec());
+    }
+
+    if is_linux_zboot(kernel) {
+        return canonicalize_linux_zboot(kernel);
+    }
+
+    if kernel.starts_with(GZIP_MAGIC) {
+        return decompress_gzip_kernel(kernel);
+    }
+
+    if kernel.starts_with(ZSTD_MAGIC) {
+        return decompress_zstd_kernel(kernel);
+    }
+
+    Err(KernelImageError::InvalidImage(
+        arm64_image_size(kernel, ImageKind::Kernel).unwrap_err(),
+    ))
+}
+
 pub fn assemble(kernel: &[u8], shim: &[u8]) -> Result<Vec<u8>, AssembleError> {
     let kernel_size = arm64_image_size(kernel, ImageKind::Kernel)?;
     let shim_size = arm64_image_size(shim, ImageKind::Shim)?;
@@ -108,6 +211,103 @@ pub fn assemble(kernel: &[u8], shim: &[u8]) -> Result<Vec<u8>, AssembleError> {
     out.extend_from_slice(kernel);
     out.resize(output_len, 0);
     Ok(out)
+}
+
+#[cfg(feature = "std")]
+fn canonicalize_linux_zboot(kernel: &[u8]) -> Result<Vec<u8>, KernelImageError> {
+    if kernel.len() < LINUX_ZBOOT_MIN_SIZE {
+        return Err(KernelImageError::ZbootTooSmall { size: kernel.len() });
+    }
+
+    let payload_offset = read_le_u32(kernel, LINUX_ZBOOT_PAYLOAD_OFFSET_OFFSET)?;
+    let payload_size = read_le_u32(kernel, LINUX_ZBOOT_PAYLOAD_SIZE_OFFSET)?;
+    let payload_end =
+        payload_offset
+            .checked_add(payload_size)
+            .ok_or(KernelImageError::SizeOverflow(
+                "Linux EFI zboot payload bounds",
+            ))?;
+    if payload_end > kernel.len() {
+        return Err(KernelImageError::ZbootPayloadOutOfBounds {
+            payload_offset,
+            payload_size,
+            image_size: kernel.len(),
+        });
+    }
+
+    let payload = &kernel[payload_offset..payload_end];
+    let compression = linux_zboot_compression(kernel);
+    if compression.starts_with(b"gzip") {
+        decompress_gzip_kernel(payload)
+    } else if compression.starts_with(b"zstd") {
+        decompress_zstd_kernel(payload)
+    } else {
+        Err(KernelImageError::UnsupportedZbootCompression(
+            String::from_utf8_lossy(compression).into_owned(),
+        ))
+    }
+}
+
+#[cfg(feature = "std")]
+fn decompress_gzip_kernel(kernel: &[u8]) -> Result<Vec<u8>, KernelImageError> {
+    let mut out = Vec::new();
+    flate2::read::GzDecoder::new(kernel)
+        .read_to_end(&mut out)
+        .map_err(KernelImageError::InvalidGzip)?;
+    verify_kernel(&out)?;
+    Ok(out)
+}
+
+#[cfg(feature = "std")]
+fn decompress_zstd_kernel(kernel: &[u8]) -> Result<Vec<u8>, KernelImageError> {
+    let out = zstd::stream::decode_all(kernel).map_err(KernelImageError::InvalidZstd)?;
+    verify_kernel(&out)?;
+    Ok(out)
+}
+
+#[cfg(feature = "std")]
+fn verify_kernel(kernel: &[u8]) -> Result<(), KernelImageError> {
+    arm64_image_size(kernel, ImageKind::Kernel)
+        .map(|_| ())
+        .map_err(KernelImageError::InvalidImage)
+}
+
+#[cfg(feature = "std")]
+fn is_arm64_image(image: &[u8]) -> bool {
+    image.len() >= ARM64_IMAGE_MIN_SIZE
+        && &image[ARM64_IMAGE_MAGIC_OFFSET..ARM64_IMAGE_MAGIC_OFFSET + ARM64_IMAGE_MAGIC.len()]
+            == ARM64_IMAGE_MAGIC
+}
+
+#[cfg(feature = "std")]
+fn is_linux_zboot(image: &[u8]) -> bool {
+    image.len() >= LINUX_ZBOOT_MIN_SIZE
+        && image.starts_with(b"MZ")
+        && &image[LINUX_ZBOOT_IMAGE_TYPE_OFFSET..LINUX_ZBOOT_IMAGE_TYPE_OFFSET + 4] == b"zimg"
+}
+
+#[cfg(feature = "std")]
+fn linux_zboot_compression(image: &[u8]) -> &[u8] {
+    let end = image
+        .len()
+        .min(LINUX_ZBOOT_COMP_TYPE_OFFSET + LINUX_ZBOOT_COMP_TYPE_MAX_LEN);
+    let compression = &image[LINUX_ZBOOT_COMP_TYPE_OFFSET..end];
+    let nul = compression
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(compression.len());
+    &compression[..nul]
+}
+
+#[cfg(feature = "std")]
+fn read_le_u32(image: &[u8], offset: usize) -> Result<usize, KernelImageError> {
+    let end = offset
+        .checked_add(4)
+        .ok_or(KernelImageError::SizeOverflow("u32 field bounds"))?;
+    if end > image.len() {
+        return Err(KernelImageError::ZbootTooSmall { size: image.len() });
+    }
+    Ok(u32::from_le_bytes(image[offset..end].try_into().unwrap()) as usize)
 }
 
 pub fn arm64_image_size(image: &[u8], kind: ImageKind) -> Result<u64, AssembleError> {
@@ -158,6 +358,9 @@ mod tests {
     use super::*;
     use alloc::vec;
 
+    #[cfg(feature = "std")]
+    use std::io::Write;
+
     #[test]
     fn assembles_shim_payload_and_padding() {
         let shim = image(0x1000, 128);
@@ -198,12 +401,79 @@ mod tests {
         assert_eq!(arm64_image_size(&image, ImageKind::Kernel), Ok(1234));
     }
 
+    #[cfg(feature = "std")]
+    #[test]
+    fn canonicalizes_raw_arm64_image() {
+        let image = image(0x2000, 256);
+
+        assert_eq!(canonicalize_kernel(&image).unwrap(), image);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn canonicalizes_gzip_arm64_image() {
+        let image = image(0x2000, 256);
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&image).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        assert_eq!(canonicalize_kernel(&compressed).unwrap(), image);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn canonicalizes_zstd_arm64_image() {
+        let image = image(0x2000, 256);
+        let compressed = zstd::stream::encode_all(image.as_slice(), 0).unwrap();
+
+        assert_eq!(canonicalize_kernel(&compressed).unwrap(), image);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn canonicalizes_linux_zboot_gzip_image() {
+        let image = image(0x2000, 256);
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&image).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let zboot = linux_zboot(b"gzip", &compressed);
+
+        assert_eq!(canonicalize_kernel(&zboot).unwrap(), image);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn canonicalizes_linux_zboot_zstd_image() {
+        let image = image(0x2000, 256);
+        let compressed = zstd::stream::encode_all(image.as_slice(), 0).unwrap();
+        let zboot = linux_zboot(b"zstd", &compressed);
+
+        assert_eq!(canonicalize_kernel(&zboot).unwrap(), image);
+    }
+
     fn image(image_size: u64, file_len: usize) -> Vec<u8> {
         let mut image = vec![0; file_len.max(ARM64_IMAGE_MIN_SIZE)];
         image[ARM64_IMAGE_SIZE_OFFSET..ARM64_IMAGE_SIZE_OFFSET + 8]
             .copy_from_slice(&image_size.to_le_bytes());
         image[ARM64_IMAGE_MAGIC_OFFSET..ARM64_IMAGE_MAGIC_OFFSET + ARM64_IMAGE_MAGIC.len()]
             .copy_from_slice(ARM64_IMAGE_MAGIC);
+        image
+    }
+
+    #[cfg(feature = "std")]
+    fn linux_zboot(compression: &[u8], payload: &[u8]) -> Vec<u8> {
+        let payload_offset = 0x100usize;
+        let mut image = vec![0; payload_offset];
+        image[..2].copy_from_slice(b"MZ");
+        image[LINUX_ZBOOT_IMAGE_TYPE_OFFSET..LINUX_ZBOOT_IMAGE_TYPE_OFFSET + 4]
+            .copy_from_slice(b"zimg");
+        image[LINUX_ZBOOT_PAYLOAD_OFFSET_OFFSET..LINUX_ZBOOT_PAYLOAD_OFFSET_OFFSET + 4]
+            .copy_from_slice(&(payload_offset as u32).to_le_bytes());
+        image[LINUX_ZBOOT_PAYLOAD_SIZE_OFFSET..LINUX_ZBOOT_PAYLOAD_SIZE_OFFSET + 4]
+            .copy_from_slice(&(payload.len() as u32).to_le_bytes());
+        image[LINUX_ZBOOT_COMP_TYPE_OFFSET..LINUX_ZBOOT_COMP_TYPE_OFFSET + compression.len()]
+            .copy_from_slice(compression);
+        image.extend_from_slice(payload);
         image
     }
 }

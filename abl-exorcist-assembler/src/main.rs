@@ -31,6 +31,8 @@ fn run() -> Result<(), String> {
         fs::read(&kernel).map_err(|err| format!("read {}: {err}", Path::new(&kernel).display()))?;
     let shim =
         fs::read(&shim).map_err(|err| format!("read {}: {err}", Path::new(&shim).display()))?;
+    let kernel =
+        abl_exorcist_assembler::canonicalize_kernel(&kernel).map_err(|err| err.to_string())?;
     let assembled =
         abl_exorcist_assembler::assemble(&kernel, &shim).map_err(|err| err.to_string())?;
 

@@ -17,7 +17,8 @@ rustup target add aarch64-unknown-none
 cargo build --release --target aarch64-unknown-none -p abl-exorcist
 llvm-objcopy -O binary target/aarch64-unknown-none/release/abl-exorcist abl-exorcist.bin
 
-# Prepare a shim+kernel payload using the assembler:
+# Prepare a shim+kernel payload using the assembler. The kernel input may be a
+# raw arm64 Image, Image.gz, Image.zst, or a Linux EFI zboot vmlinuz.efi:
 cargo run -p abl-exorcist-assembler -- /path/to/kernel/Image abl-exorcist.bin > /tmp/blessed
 ```
 
