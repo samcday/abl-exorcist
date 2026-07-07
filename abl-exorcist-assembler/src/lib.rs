@@ -2,17 +2,27 @@
 
 extern crate alloc;
 
-use alloc::vec::Vec;
 use core::fmt;
 
 #[cfg(feature = "std")]
+use alloc::vec::Vec;
+#[cfg(feature = "std")]
 use std::io::Read;
+#[cfg(feature = "std")]
+use std::io::Write;
 
 const ARM64_IMAGE_MIN_SIZE: usize = 64;
 const ARM64_IMAGE_SIZE_OFFSET: usize = 16;
 const ARM64_IMAGE_MAGIC_OFFSET: usize = 56;
 const ARM64_IMAGE_MAGIC: &[u8; 4] = b"ARM\x64";
-const PAYLOAD_ALIGN: u64 = 0x20_0000;
+#[cfg(feature = "std")]
+const PACKAGE_ALIGN: u64 = 0x1000;
+#[cfg(feature = "std")]
+const PACKAGE_MAGIC: &[u8; 8] = b"ABLXPKG1";
+#[cfg(feature = "std")]
+const PACKAGE_HEADER_LEN: usize = 48;
+#[cfg(feature = "std")]
+const PACKAGE_COMPRESSION_RAW_DEFLATE: u32 = 1;
 
 #[cfg(feature = "std")]
 const GZIP_MAGIC: &[u8; 2] = b"\x1f\x8b";
@@ -53,6 +63,7 @@ pub enum AssembleError {
     ZeroImageSize { image: ImageKind },
     ShimTooLarge { len: u64, payload_offset: u64 },
     KernelLargerThanImageSize { len: u64, image_size: u64 },
+    CompressKernel,
     InvalidAlignment(u64),
     SizeOverflow(&'static str),
 }
@@ -79,6 +90,7 @@ impl fmt::Display for AssembleError {
                 f,
                 "kernel file length 0x{len:x} exceeds arm64 image_size 0x{image_size:x}"
             ),
+            Self::CompressKernel => write!(f, "failed to deflate kernel image"),
             Self::InvalidAlignment(alignment) => write!(
                 f,
                 "alignment must be a non-zero power of two: 0x{alignment:x}"
@@ -174,17 +186,18 @@ pub fn canonicalize_kernel(kernel: &[u8]) -> Result<Vec<u8>, KernelImageError> {
     ))
 }
 
+#[cfg(feature = "std")]
 pub fn assemble(kernel: &[u8], shim: &[u8]) -> Result<Vec<u8>, AssembleError> {
     let kernel_size = arm64_image_size(kernel, ImageKind::Kernel)?;
     let shim_size = arm64_image_size(shim, ImageKind::Shim)?;
-    let payload_offset = payload_source_offset(shim_size)?;
+    let package_offset = package_source_offset(shim_size)?;
     let shim_file_len =
         u64::try_from(shim.len()).map_err(|_| AssembleError::SizeOverflow("shim file length"))?;
 
-    if shim_file_len > payload_offset {
+    if shim_file_len > package_offset {
         return Err(AssembleError::ShimTooLarge {
             len: shim_file_len,
-            payload_offset,
+            payload_offset: package_offset,
         });
     }
 
@@ -197,20 +210,58 @@ pub fn assemble(kernel: &[u8], shim: &[u8]) -> Result<Vec<u8>, AssembleError> {
         });
     }
 
-    let output_len = payload_offset
-        .checked_add(kernel_size)
+    let compressed_kernel = deflate_kernel(kernel)?;
+    let compressed_kernel_len = u64::try_from(compressed_kernel.len())
+        .map_err(|_| AssembleError::SizeOverflow("compressed kernel length"))?;
+    let package_len = (PACKAGE_HEADER_LEN as u64)
+        .checked_add(compressed_kernel_len)
+        .ok_or(AssembleError::SizeOverflow("kernel package length"))?;
+    let output_len = package_offset
+        .checked_add(package_len)
         .ok_or(AssembleError::SizeOverflow("assembled image length"))?;
-    let payload_offset = usize::try_from(payload_offset)
-        .map_err(|_| AssembleError::SizeOverflow("payload offset"))?;
+    let package_offset = usize::try_from(package_offset)
+        .map_err(|_| AssembleError::SizeOverflow("package offset"))?;
     let output_len = usize::try_from(output_len)
         .map_err(|_| AssembleError::SizeOverflow("assembled image length"))?;
 
     let mut out = Vec::with_capacity(output_len);
     out.extend_from_slice(shim);
-    out.resize(payload_offset, 0);
-    out.extend_from_slice(kernel);
-    out.resize(output_len, 0);
+    out.resize(package_offset, 0);
+    write_package_header(
+        &mut out,
+        compressed_kernel_len,
+        kernel_file_len,
+        kernel_size,
+    );
+    out.extend_from_slice(&compressed_kernel);
     Ok(out)
+}
+
+#[cfg(feature = "std")]
+fn deflate_kernel(kernel: &[u8]) -> Result<Vec<u8>, AssembleError> {
+    let mut encoder = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::best());
+    encoder
+        .write_all(kernel)
+        .map_err(|_| AssembleError::CompressKernel)?;
+    encoder.finish().map_err(|_| AssembleError::CompressKernel)
+}
+
+#[cfg(feature = "std")]
+fn write_package_header(
+    out: &mut Vec<u8>,
+    compressed_size: u64,
+    uncompressed_size: u64,
+    image_size: u64,
+) {
+    let start_len = out.len();
+    out.extend_from_slice(PACKAGE_MAGIC);
+    out.extend_from_slice(&(PACKAGE_HEADER_LEN as u32).to_le_bytes());
+    out.extend_from_slice(&PACKAGE_COMPRESSION_RAW_DEFLATE.to_le_bytes());
+    out.extend_from_slice(&compressed_size.to_le_bytes());
+    out.extend_from_slice(&uncompressed_size.to_le_bytes());
+    out.extend_from_slice(&image_size.to_le_bytes());
+    out.extend_from_slice(&0u64.to_le_bytes());
+    debug_assert_eq!(out.len() - start_len, PACKAGE_HEADER_LEN);
 }
 
 #[cfg(feature = "std")]
@@ -334,13 +385,12 @@ pub fn arm64_image_size(image: &[u8], kind: ImageKind) -> Result<u64, AssembleEr
     Ok(image_size)
 }
 
-fn payload_source_offset(shim_size: u64) -> Result<u64, AssembleError> {
-    let with_skid = shim_size
-        .checked_add(PAYLOAD_ALIGN)
-        .ok_or(AssembleError::SizeOverflow("abl-exorcist image size"))?;
-    align_up(with_skid, PAYLOAD_ALIGN)
+#[cfg(feature = "std")]
+fn package_source_offset(shim_size: u64) -> Result<u64, AssembleError> {
+    align_up(shim_size, PACKAGE_ALIGN)
 }
 
+#[cfg(feature = "std")]
 fn align_up(value: u64, alignment: u64) -> Result<u64, AssembleError> {
     if alignment == 0 || !alignment.is_power_of_two() {
         return Err(AssembleError::InvalidAlignment(alignment));
@@ -362,6 +412,7 @@ mod tests {
     use std::io::Write;
 
     #[test]
+    #[cfg(feature = "std")]
     fn assembles_shim_payload_and_padding() {
         let shim = image(0x1000, 128);
         let kernel = image(0x2000, 256);
@@ -369,28 +420,42 @@ mod tests {
         let assembled = assemble(&kernel, &shim).unwrap();
 
         assert_eq!(&assembled[..shim.len()], shim.as_slice());
-        assert_eq!(
-            &assembled[PAYLOAD_ALIGN as usize * 2..PAYLOAD_ALIGN as usize * 2 + kernel.len()],
-            kernel.as_slice()
-        );
-        assert_eq!(assembled.len(), PAYLOAD_ALIGN as usize * 2 + 0x2000);
         assert!(
-            assembled[shim.len()..PAYLOAD_ALIGN as usize * 2]
+            assembled[shim.len()..PACKAGE_ALIGN as usize]
                 .iter()
                 .all(|byte| *byte == 0)
         );
+
+        assert_eq!(
+            &assembled[PACKAGE_ALIGN as usize..PACKAGE_ALIGN as usize + PACKAGE_MAGIC.len()],
+            PACKAGE_MAGIC
+        );
+        assert_eq!(read_package_u32(&assembled, 0), PACKAGE_HEADER_LEN as u32);
+        assert_eq!(
+            read_package_u32(&assembled, 4),
+            PACKAGE_COMPRESSION_RAW_DEFLATE
+        );
+        assert_eq!(read_package_u64(&assembled, 16), kernel.len() as u64);
+        assert_eq!(read_package_u64(&assembled, 24), 0x2000);
+
+        let compressed_size = read_package_u64(&assembled, 8) as usize;
+        let compressed = &assembled[PACKAGE_ALIGN as usize + PACKAGE_HEADER_LEN
+            ..PACKAGE_ALIGN as usize + PACKAGE_HEADER_LEN + compressed_size];
+        let mut decompressed = Vec::new();
+        flate2::read::DeflateDecoder::new(compressed)
+            .read_to_end(&mut decompressed)
+            .unwrap();
+        assert_eq!(decompressed, kernel);
     }
 
     #[test]
-    fn payload_offset_includes_one_alignment_skid() {
-        assert_eq!(payload_source_offset(1).unwrap(), PAYLOAD_ALIGN * 2);
+    #[cfg(feature = "std")]
+    fn package_offset_is_4k_aligned_after_shim_image() {
+        assert_eq!(package_source_offset(1).unwrap(), PACKAGE_ALIGN);
+        assert_eq!(package_source_offset(PACKAGE_ALIGN).unwrap(), PACKAGE_ALIGN);
         assert_eq!(
-            payload_source_offset(PAYLOAD_ALIGN).unwrap(),
-            PAYLOAD_ALIGN * 2
-        );
-        assert_eq!(
-            payload_source_offset(PAYLOAD_ALIGN + 1).unwrap(),
-            PAYLOAD_ALIGN * 3
+            package_source_offset(PACKAGE_ALIGN + 1).unwrap(),
+            PACKAGE_ALIGN * 2
         );
     }
 
@@ -475,5 +540,17 @@ mod tests {
             .copy_from_slice(compression);
         image.extend_from_slice(payload);
         image
+    }
+
+    #[cfg(feature = "std")]
+    fn read_package_u32(image: &[u8], offset: usize) -> u32 {
+        let offset = PACKAGE_ALIGN as usize + PACKAGE_MAGIC.len() + offset;
+        u32::from_le_bytes(image[offset..offset + 4].try_into().unwrap())
+    }
+
+    #[cfg(feature = "std")]
+    fn read_package_u64(image: &[u8], offset: usize) -> u64 {
+        let offset = PACKAGE_ALIGN as usize + PACKAGE_MAGIC.len() + offset;
+        u64::from_le_bytes(image[offset..offset + 8].try_into().unwrap())
     }
 }

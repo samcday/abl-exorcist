@@ -8,13 +8,35 @@ use core::panic::PanicInfo;
 core::arch::global_asm!(include_str!("start.S"));
 
 #[cfg(target_os = "none")]
+const ARM64_IMAGE_MIN_SIZE: usize = 64;
+#[cfg(target_os = "none")]
 const ARM64_IMAGE_SIZE_OFFSET: usize = 16;
 #[cfg(target_os = "none")]
 const ARM64_IMAGE_MAGIC_OFFSET: usize = 56;
 #[cfg(target_os = "none")]
 const ARM64_IMAGE_MAGIC: u32 = u32::from_le_bytes(*b"ARM\x64");
 #[cfg(target_os = "none")]
-const PAYLOAD_ALIGN: usize = 0x20_0000;
+const PACKAGE_ALIGN: usize = 0x1000;
+#[cfg(target_os = "none")]
+const PACKAGE_MAGIC: &[u8; 8] = b"ABLXPKG1";
+#[cfg(target_os = "none")]
+const PACKAGE_HEADER_LEN: usize = 48;
+#[cfg(target_os = "none")]
+const PACKAGE_HEADER_SIZE_OFFSET: usize = 8;
+#[cfg(target_os = "none")]
+const PACKAGE_COMPRESSION_OFFSET: usize = 12;
+#[cfg(target_os = "none")]
+const PACKAGE_COMPRESSED_SIZE_OFFSET: usize = 16;
+#[cfg(target_os = "none")]
+const PACKAGE_UNCOMPRESSED_SIZE_OFFSET: usize = 24;
+#[cfg(target_os = "none")]
+const PACKAGE_IMAGE_SIZE_OFFSET: usize = 32;
+#[cfg(target_os = "none")]
+const PACKAGE_COMPRESSION_RAW_DEFLATE: u32 = 1;
+#[cfg(target_os = "none")]
+const KERNEL_ALIGN: usize = 0x20_0000;
+#[cfg(target_os = "none")]
+const KERNEL_MIN_DESTINATION_OFFSET: usize = 0x0600_0000;
 #[cfg(any(target_os = "none", test))]
 const FDT_MAGIC: u32 = 0xd00d_feed;
 #[cfg(any(target_os = "none", test))]
@@ -45,6 +67,15 @@ const CMDLINE_END: &[u8] = b"<E>";
 const ANDROIDBOOT_PREFIX: &[u8] = b"androidboot.";
 
 #[cfg(target_os = "none")]
+struct KernelPackage {
+    compressed_source: usize,
+    compressed_size: usize,
+    uncompressed_size: usize,
+    image_size: usize,
+    end: usize,
+}
+
+#[cfg(target_os = "none")]
 unsafe extern "C" {
     fn _start() -> !;
 }
@@ -52,21 +83,22 @@ unsafe extern "C" {
 #[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
 pub extern "C" fn abl_exorcist_main(fdt: usize) -> ! {
-    let payload_source = payload_source();
-    if read32(payload_source + ARM64_IMAGE_MAGIC_OFFSET) != ARM64_IMAGE_MAGIC {
+    let Some(package_source) = package_source() else {
         halt();
-    }
-
-    let payload_size = read64(payload_source + ARM64_IMAGE_SIZE_OFFSET) as usize;
-    if payload_size == 0 {
+    };
+    let Some(package) = read_kernel_package(package_source) else {
+        halt();
+    };
+    let Some(payload_entry) = kernel_destination(package.end, package.image_size, fdt) else {
+        halt();
+    };
+    if !inflate_kernel(&package, payload_entry) {
         halt();
     }
 
     rewrite_bootargs_from_raw_fdt(fdt);
 
-    let payload_entry = align_down(payload_source, PAYLOAD_ALIGN);
-    move_payload(payload_source, payload_entry, payload_size);
-    clean_dcache_range(payload_entry, payload_size);
+    clean_dcache_range(payload_entry, package.image_size);
     clean_raw_fdt(fdt);
     invalidate_icache();
 
@@ -89,21 +121,127 @@ fn halt() -> ! {
 }
 
 #[cfg(target_os = "none")]
-fn payload_source() -> usize {
+fn package_source() -> Option<usize> {
     let base = _start as *const () as usize;
-    let image_size = read64(base + ARM64_IMAGE_SIZE_OFFSET) as usize;
-    align_up(image_size + PAYLOAD_ALIGN, PAYLOAD_ALIGN) + base
+    let image_size = usize::try_from(read64(base + ARM64_IMAGE_SIZE_OFFSET)).ok()?;
+    let offset = align_up_checked(image_size, PACKAGE_ALIGN)?;
+    base.checked_add(offset)
 }
 
 #[cfg(target_os = "none")]
-fn move_payload(source: usize, destination: usize, size: usize) {
-    if source == destination || size == 0 {
-        return;
+fn read_kernel_package(source: usize) -> Option<KernelPackage> {
+    if !package_magic_matches(source) {
+        return None;
     }
 
-    unsafe {
-        core::ptr::copy(source as *const u8, destination as *mut u8, size);
+    if read32(source + PACKAGE_HEADER_SIZE_OFFSET) as usize != PACKAGE_HEADER_LEN {
+        return None;
     }
+    if read32(source + PACKAGE_COMPRESSION_OFFSET) != PACKAGE_COMPRESSION_RAW_DEFLATE {
+        return None;
+    }
+
+    let compressed_size = usize::try_from(read64(source + PACKAGE_COMPRESSED_SIZE_OFFSET)).ok()?;
+    let uncompressed_size =
+        usize::try_from(read64(source + PACKAGE_UNCOMPRESSED_SIZE_OFFSET)).ok()?;
+    let image_size = usize::try_from(read64(source + PACKAGE_IMAGE_SIZE_OFFSET)).ok()?;
+    if compressed_size == 0
+        || uncompressed_size < ARM64_IMAGE_MIN_SIZE
+        || image_size == 0
+        || uncompressed_size > image_size
+    {
+        return None;
+    }
+
+    let compressed_source = source.checked_add(PACKAGE_HEADER_LEN)?;
+    let end = compressed_source.checked_add(compressed_size)?;
+    Some(KernelPackage {
+        compressed_source,
+        compressed_size,
+        uncompressed_size,
+        image_size,
+        end,
+    })
+}
+
+#[cfg(target_os = "none")]
+fn package_magic_matches(source: usize) -> bool {
+    let magic = unsafe { core::slice::from_raw_parts(source as *const u8, PACKAGE_MAGIC.len()) };
+    magic == PACKAGE_MAGIC
+}
+
+#[cfg(target_os = "none")]
+fn kernel_destination(package_end: usize, image_size: usize, fdt: usize) -> Option<usize> {
+    let mut floor = package_end;
+    let base = _start as *const () as usize;
+    floor = floor.max(base.checked_add(KERNEL_MIN_DESTINATION_OFFSET)?);
+
+    if let Some((_, fdt_end)) = raw_fdt_range(fdt) {
+        floor = floor.max(fdt_end);
+
+        let fdt_size = fdt_end.checked_sub(fdt)?;
+        let fdt_slice = unsafe { core::slice::from_raw_parts(fdt as *const u8, fdt_size) };
+        if let Ok(Some((_, initrd_end))) = find_initrd_range(fdt_slice) {
+            floor = floor.max(initrd_end);
+        }
+    }
+
+    let destination = align_up_checked(floor, KERNEL_ALIGN)?;
+    destination.checked_add(image_size)?;
+    Some(destination)
+}
+
+#[cfg(target_os = "none")]
+fn inflate_kernel(package: &KernelPackage, destination: usize) -> bool {
+    let input = unsafe {
+        core::slice::from_raw_parts(
+            package.compressed_source as *const u8,
+            package.compressed_size,
+        )
+    };
+    let output = unsafe {
+        core::slice::from_raw_parts_mut(destination as *mut u8, package.uncompressed_size)
+    };
+
+    let Ok(written) = miniz_oxide::inflate::decompress_slice_iter_to_slice(
+        output,
+        core::iter::once(input),
+        false,
+        true,
+    ) else {
+        return false;
+    };
+    if written != package.uncompressed_size {
+        return false;
+    }
+
+    if read32(destination + ARM64_IMAGE_MAGIC_OFFSET) != ARM64_IMAGE_MAGIC {
+        return false;
+    }
+    if read64(destination + ARM64_IMAGE_SIZE_OFFSET) as usize != package.image_size {
+        return false;
+    }
+
+    let tail_start = destination + package.uncompressed_size;
+    let tail_len = package.image_size - package.uncompressed_size;
+    unsafe {
+        core::ptr::write_bytes(tail_start as *mut u8, 0, tail_len);
+    }
+
+    true
+}
+
+#[cfg(target_os = "none")]
+fn raw_fdt_range(fdt: usize) -> Option<(usize, usize)> {
+    if fdt == 0 || read_be_u32_raw(fdt) != FDT_MAGIC {
+        return None;
+    }
+
+    let totalsize = read_be_u32_raw(fdt + 4) as usize;
+    if totalsize < FDT_HEADER_SIZE {
+        return None;
+    }
+    Some((fdt, fdt.checked_add(totalsize)?))
 }
 
 #[cfg(target_os = "none")]
@@ -226,6 +364,49 @@ fn rewrite_bootargs(fdt: &mut [u8]) -> Result<bool, FdtError> {
 
 #[cfg(any(target_os = "none", test))]
 fn find_bootargs(fdt: &[u8]) -> Result<(usize, usize), FdtError> {
+    find_chosen_prop(fdt, b"bootargs")
+}
+
+#[cfg(any(target_os = "none", test))]
+fn find_initrd_range(fdt: &[u8]) -> Result<Option<(usize, usize)>, FdtError> {
+    let start = match find_chosen_prop(fdt, b"linux,initrd-start") {
+        Ok(prop) => prop,
+        Err(FdtError::NotFound) => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    let end = match find_chosen_prop(fdt, b"linux,initrd-end") {
+        Ok(prop) => prop,
+        Err(FdtError::NotFound) => return Ok(None),
+        Err(err) => return Err(err),
+    };
+
+    let start = read_address_prop(fdt, start)?;
+    let end = read_address_prop(fdt, end)?;
+    if end <= start {
+        return Err(FdtError::BadStructure);
+    }
+
+    Ok(Some((start, end)))
+}
+
+#[cfg(any(target_os = "none", test))]
+fn read_address_prop(fdt: &[u8], prop: (usize, usize)) -> Result<usize, FdtError> {
+    let (offset, len) = prop;
+    match len {
+        4 => Ok(be32_at(fdt, offset)? as usize),
+        8 => {
+            let bytes = fdt.get(offset..offset + 8).ok_or(FdtError::BadStructure)?;
+            let value = u64::from_be_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ]);
+            usize::try_from(value).map_err(|_| FdtError::BadStructure)
+        }
+        _ => Err(FdtError::BadStructure),
+    }
+}
+
+#[cfg(any(target_os = "none", test))]
+fn find_chosen_prop(fdt: &[u8], property_name: &[u8]) -> Result<(usize, usize), FdtError> {
     if fdt.len() < FDT_HEADER_SIZE || be32_at(fdt, 0)? != FDT_MAGIC {
         return Err(FdtError::BadHeader);
     }
@@ -279,7 +460,7 @@ fn find_bootargs(fdt: &[u8]) -> Result<(usize, usize), FdtError> {
                 pos = align_up(value_end, 4);
 
                 if chosen_depth == Some(depth)
-                    && string_at(fdt, strings_offset, strings_end, name_offset)? == b"bootargs"
+                    && string_at(fdt, strings_offset, strings_end, name_offset)? == property_name
                 {
                     return Ok((value_offset, len));
                 }
@@ -486,6 +667,16 @@ fn align_up(value: usize, alignment: usize) -> usize {
 }
 
 #[cfg(target_os = "none")]
+fn align_up_checked(value: usize, alignment: usize) -> Option<usize> {
+    if alignment == 0 || !alignment.is_power_of_two() {
+        return None;
+    }
+
+    let mask = alignment - 1;
+    Some(value.checked_add(mask)? & !mask)
+}
+
+#[cfg(target_os = "none")]
 fn align_down(value: usize, alignment: usize) -> usize {
     value & !(alignment - 1)
 }
@@ -583,21 +774,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn finds_initrd_range_in_fdt() {
+        let start = 0x0400_0000u64.to_be_bytes();
+        let end = 0x0570_0000u64.to_be_bytes();
+        let fdt = test_fdt_props(&[
+            (&b"linux,initrd-start"[..], start.as_slice()),
+            (&b"linux,initrd-end"[..], end.as_slice()),
+        ]);
+
+        assert_eq!(
+            find_initrd_range(&fdt),
+            Ok(Some((0x0400_0000, 0x0570_0000)))
+        );
+    }
+
+    #[test]
+    fn missing_initrd_range_is_none() {
+        let fdt = test_fdt(b"root=/dev/dm-0\0");
+
+        assert_eq!(find_initrd_range(&fdt), Ok(None));
+    }
+
     fn cstr(value: &[u8]) -> &[u8] {
         &value[..nul_terminated_len(value)]
     }
 
     fn test_fdt(bootargs: &[u8]) -> Vec<u8> {
-        let strings = b"bootargs\0";
+        test_fdt_props(&[(&b"bootargs"[..], bootargs)])
+    }
+
+    fn test_fdt_props(props: &[(&[u8], &[u8])]) -> Vec<u8> {
+        let mut strings = Vec::new();
+        let mut name_offsets = Vec::new();
+        for (name, _) in props {
+            name_offsets.push(strings.len() as u32);
+            strings.extend_from_slice(name);
+            strings.push(0);
+        }
+
         let mut structure = Vec::new();
         push_be32(&mut structure, FDT_BEGIN_NODE);
         push_padded_bytes(&mut structure, b"\0");
         push_be32(&mut structure, FDT_BEGIN_NODE);
         push_padded_bytes(&mut structure, b"chosen\0");
-        push_be32(&mut structure, FDT_PROP);
-        push_be32(&mut structure, bootargs.len() as u32);
-        push_be32(&mut structure, 0);
-        push_padded_bytes(&mut structure, bootargs);
+        for ((_, value), name_offset) in props.iter().zip(name_offsets.iter()) {
+            push_be32(&mut structure, FDT_PROP);
+            push_be32(&mut structure, value.len() as u32);
+            push_be32(&mut structure, *name_offset);
+            push_padded_bytes(&mut structure, value);
+        }
         push_be32(&mut structure, FDT_END_NODE);
         push_be32(&mut structure, FDT_END_NODE);
         push_be32(&mut structure, FDT_END);
@@ -620,7 +846,7 @@ mod tests {
         push_be32(&mut fdt, structure.len() as u32);
         fdt.extend_from_slice(&[0; 16]);
         fdt.extend_from_slice(&structure);
-        fdt.extend_from_slice(strings);
+        fdt.extend_from_slice(&strings);
         fdt
     }
 

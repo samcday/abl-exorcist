@@ -5,6 +5,9 @@ version = 4
 [[package]]
 name = "abl-exorcist"
 version = "0.1.0"
+dependencies = [
+ "miniz_oxide",
+]
 
 [[package]]
 name = "abl-exorcist-assembler"
