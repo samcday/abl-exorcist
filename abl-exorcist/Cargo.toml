@@ -6,5 +6,7 @@ license.workspace = true
 publish = false
 build = "build.rs"
 
-[dependencies]
-miniz_oxide = { version = "0.8", default-features = false }
+[features]
+default = []
+serial-sdm670-uart12 = []
+cache-sdm670-experiment = []

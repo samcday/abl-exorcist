@@ -8,8 +8,6 @@ use core::fmt;
 use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use std::io::Read;
-#[cfg(feature = "std")]
-use std::io::Write;
 
 const ARM64_IMAGE_MIN_SIZE: usize = 64;
 const ARM64_IMAGE_SIZE_OFFSET: usize = 16;
@@ -22,7 +20,13 @@ const PACKAGE_MAGIC: &[u8; 8] = b"ABLXPKG1";
 #[cfg(feature = "std")]
 const PACKAGE_HEADER_LEN: usize = 48;
 #[cfg(feature = "std")]
-const PACKAGE_COMPRESSION_RAW_DEFLATE: u32 = 1;
+const PACKAGE_COMPRESSION_LZ4: u32 = 2;
+#[cfg(feature = "std")]
+const RAMDISK_ALIGN: u64 = 0x1000;
+#[cfg(feature = "std")]
+const RAMDISK_MAGIC: &[u8; 8] = b"ABLXRD1\0";
+#[cfg(feature = "std")]
+const RAMDISK_HEADER_LEN: usize = 72;
 
 #[cfg(feature = "std")]
 const GZIP_MAGIC: &[u8; 2] = b"\x1f\x8b";
@@ -90,7 +94,7 @@ impl fmt::Display for AssembleError {
                 f,
                 "kernel file length 0x{len:x} exceeds arm64 image_size 0x{image_size:x}"
             ),
-            Self::CompressKernel => write!(f, "failed to deflate kernel image"),
+            Self::CompressKernel => write!(f, "failed to compress kernel image"),
             Self::InvalidAlignment(alignment) => write!(
                 f,
                 "alignment must be a non-zero power of two: 0x{alignment:x}"
@@ -210,7 +214,7 @@ pub fn assemble(kernel: &[u8], shim: &[u8]) -> Result<Vec<u8>, AssembleError> {
         });
     }
 
-    let compressed_kernel = deflate_kernel(kernel)?;
+    let compressed_kernel = compress_kernel(kernel)?;
     let compressed_kernel_len = u64::try_from(compressed_kernel.len())
         .map_err(|_| AssembleError::SizeOverflow("compressed kernel length"))?;
     let package_len = (PACKAGE_HEADER_LEN as u64)
@@ -238,12 +242,62 @@ pub fn assemble(kernel: &[u8], shim: &[u8]) -> Result<Vec<u8>, AssembleError> {
 }
 
 #[cfg(feature = "std")]
-fn deflate_kernel(kernel: &[u8]) -> Result<Vec<u8>, AssembleError> {
-    let mut encoder = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::best());
-    encoder
-        .write_all(kernel)
+pub fn assemble_ramdisk(kernel: &[u8], initrd: &[u8]) -> Result<Vec<u8>, AssembleError> {
+    let kernel_size = arm64_image_size(kernel, ImageKind::Kernel)?;
+    let kernel_file_len = u64::try_from(kernel.len())
+        .map_err(|_| AssembleError::SizeOverflow("kernel file length"))?;
+    if kernel_file_len > kernel_size {
+        return Err(AssembleError::KernelLargerThanImageSize {
+            len: kernel_file_len,
+            image_size: kernel_size,
+        });
+    }
+
+    let compressed_kernel = compress_kernel(kernel)?;
+    let compressed_kernel_len = u64::try_from(compressed_kernel.len())
+        .map_err(|_| AssembleError::SizeOverflow("compressed kernel length"))?;
+    let initrd_len =
+        u64::try_from(initrd.len()).map_err(|_| AssembleError::SizeOverflow("initrd length"))?;
+    let kernel_offset = align_up(RAMDISK_HEADER_LEN as u64, RAMDISK_ALIGN)?;
+    let initrd_offset = align_up(
+        kernel_offset
+            .checked_add(compressed_kernel_len)
+            .ok_or(AssembleError::SizeOverflow("ramdisk kernel bounds"))?,
+        RAMDISK_ALIGN,
+    )?;
+    let output_len = initrd_offset
+        .checked_add(initrd_len)
+        .ok_or(AssembleError::SizeOverflow("ramdisk container length"))?;
+    let kernel_offset = usize::try_from(kernel_offset)
+        .map_err(|_| AssembleError::SizeOverflow("ramdisk kernel offset"))?;
+    let initrd_offset = usize::try_from(initrd_offset)
+        .map_err(|_| AssembleError::SizeOverflow("ramdisk initrd offset"))?;
+    let output_len = usize::try_from(output_len)
+        .map_err(|_| AssembleError::SizeOverflow("ramdisk container length"))?;
+
+    let mut out = Vec::with_capacity(output_len);
+    write_ramdisk_header(
+        &mut out,
+        kernel_offset as u64,
+        compressed_kernel_len,
+        kernel_file_len,
+        kernel_size,
+        initrd_offset as u64,
+        initrd_len,
+    );
+    out.resize(kernel_offset, 0);
+    out.extend_from_slice(&compressed_kernel);
+    out.resize(initrd_offset, 0);
+    out.extend_from_slice(initrd);
+    Ok(out)
+}
+
+#[cfg(feature = "std")]
+fn compress_kernel(kernel: &[u8]) -> Result<Vec<u8>, AssembleError> {
+    let mut out = Vec::new();
+    lzzzz::lz4_hc::compress_to_vec(kernel, &mut out, lzzzz::lz4_hc::CLEVEL_MAX)
         .map_err(|_| AssembleError::CompressKernel)?;
-    encoder.finish().map_err(|_| AssembleError::CompressKernel)
+    Ok(out)
 }
 
 #[cfg(feature = "std")]
@@ -256,12 +310,36 @@ fn write_package_header(
     let start_len = out.len();
     out.extend_from_slice(PACKAGE_MAGIC);
     out.extend_from_slice(&(PACKAGE_HEADER_LEN as u32).to_le_bytes());
-    out.extend_from_slice(&PACKAGE_COMPRESSION_RAW_DEFLATE.to_le_bytes());
+    out.extend_from_slice(&PACKAGE_COMPRESSION_LZ4.to_le_bytes());
     out.extend_from_slice(&compressed_size.to_le_bytes());
     out.extend_from_slice(&uncompressed_size.to_le_bytes());
     out.extend_from_slice(&image_size.to_le_bytes());
     out.extend_from_slice(&0u64.to_le_bytes());
     debug_assert_eq!(out.len() - start_len, PACKAGE_HEADER_LEN);
+}
+
+#[cfg(feature = "std")]
+fn write_ramdisk_header(
+    out: &mut Vec<u8>,
+    kernel_offset: u64,
+    compressed_size: u64,
+    uncompressed_size: u64,
+    image_size: u64,
+    initrd_offset: u64,
+    initrd_size: u64,
+) {
+    let start_len = out.len();
+    out.extend_from_slice(RAMDISK_MAGIC);
+    out.extend_from_slice(&(RAMDISK_HEADER_LEN as u32).to_le_bytes());
+    out.extend_from_slice(&PACKAGE_COMPRESSION_LZ4.to_le_bytes());
+    out.extend_from_slice(&kernel_offset.to_le_bytes());
+    out.extend_from_slice(&compressed_size.to_le_bytes());
+    out.extend_from_slice(&uncompressed_size.to_le_bytes());
+    out.extend_from_slice(&image_size.to_le_bytes());
+    out.extend_from_slice(&initrd_offset.to_le_bytes());
+    out.extend_from_slice(&initrd_size.to_le_bytes());
+    out.extend_from_slice(&0u64.to_le_bytes());
+    debug_assert_eq!(out.len() - start_len, RAMDISK_HEADER_LEN);
 }
 
 #[cfg(feature = "std")]
@@ -431,20 +509,47 @@ mod tests {
             PACKAGE_MAGIC
         );
         assert_eq!(read_package_u32(&assembled, 0), PACKAGE_HEADER_LEN as u32);
-        assert_eq!(
-            read_package_u32(&assembled, 4),
-            PACKAGE_COMPRESSION_RAW_DEFLATE
-        );
+        assert_eq!(read_package_u32(&assembled, 4), PACKAGE_COMPRESSION_LZ4);
         assert_eq!(read_package_u64(&assembled, 16), kernel.len() as u64);
         assert_eq!(read_package_u64(&assembled, 24), 0x2000);
 
         let compressed_size = read_package_u64(&assembled, 8) as usize;
         let compressed = &assembled[PACKAGE_ALIGN as usize + PACKAGE_HEADER_LEN
             ..PACKAGE_ALIGN as usize + PACKAGE_HEADER_LEN + compressed_size];
-        let mut decompressed = Vec::new();
-        flate2::read::DeflateDecoder::new(compressed)
-            .read_to_end(&mut decompressed)
-            .unwrap();
+        let mut decompressed = vec![0; kernel.len()];
+        lzzzz::lz4::decompress(compressed, &mut decompressed).unwrap();
+        assert_eq!(decompressed, kernel);
+    }
+
+    #[test]
+    #[cfg(feature = "std")]
+    fn assembles_ramdisk_container() {
+        let kernel = image(0x2000, 256);
+        let initrd = b"real initrd";
+
+        let assembled = assemble_ramdisk(&kernel, initrd).unwrap();
+
+        assert_eq!(&assembled[..RAMDISK_MAGIC.len()], RAMDISK_MAGIC);
+        assert_eq!(read_u32(&assembled, 8), RAMDISK_HEADER_LEN as u32);
+        assert_eq!(read_u32(&assembled, 12), PACKAGE_COMPRESSION_LZ4);
+        let kernel_offset = read_u64(&assembled, 16) as usize;
+        let compressed_size = read_u64(&assembled, 24) as usize;
+        let uncompressed_size = read_u64(&assembled, 32);
+        let image_size = read_u64(&assembled, 40);
+        let initrd_offset = read_u64(&assembled, 48) as usize;
+        let initrd_size = read_u64(&assembled, 56) as usize;
+
+        assert_eq!(uncompressed_size, kernel.len() as u64);
+        assert_eq!(image_size, 0x2000);
+        assert_eq!(initrd_size, initrd.len());
+        assert_eq!(
+            &assembled[initrd_offset..initrd_offset + initrd_size],
+            initrd
+        );
+
+        let compressed = &assembled[kernel_offset..kernel_offset + compressed_size];
+        let mut decompressed = vec![0; kernel.len()];
+        lzzzz::lz4::decompress(compressed, &mut decompressed).unwrap();
         assert_eq!(decompressed, kernel);
     }
 
@@ -551,6 +656,16 @@ mod tests {
     #[cfg(feature = "std")]
     fn read_package_u64(image: &[u8], offset: usize) -> u64 {
         let offset = PACKAGE_ALIGN as usize + PACKAGE_MAGIC.len() + offset;
+        u64::from_le_bytes(image[offset..offset + 8].try_into().unwrap())
+    }
+
+    #[cfg(feature = "std")]
+    fn read_u32(image: &[u8], offset: usize) -> u32 {
+        u32::from_le_bytes(image[offset..offset + 4].try_into().unwrap())
+    }
+
+    #[cfg(feature = "std")]
+    fn read_u64(image: &[u8], offset: usize) -> u64 {
         u64::from_le_bytes(image[offset..offset + 8].try_into().unwrap())
     }
 }
