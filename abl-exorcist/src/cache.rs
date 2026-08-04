@@ -1,9 +1,10 @@
-const PAGE_TABLE_ENTRIES: usize = 512;
+use super::{CACHE_DEVICE_END, CACHE_DEVICE_START, CACHE_DRAM_START};
 
-const UART_WINDOW_BASE: usize = 0x00a0_0000;
-const UART_WINDOW_L2_INDEX: usize = UART_WINDOW_BASE >> 21;
-const DRAM_BASE: usize = 0x8000_0000;
-const DRAM_L1_INDEX: usize = DRAM_BASE >> 30;
+const PAGE_TABLE_ENTRIES: usize = 512;
+const _: () = assert!(CACHE_DEVICE_END - CACHE_DEVICE_START == 0x20_0000);
+
+const UART_WINDOW_L2_INDEX: usize = CACHE_DEVICE_START >> 21;
+const DRAM_L1_INDEX: usize = CACHE_DRAM_START >> 30;
 
 const PTE_TYPE_BLOCK: u64 = 1 << 0;
 const PTE_TYPE_TABLE: u64 = 3 << 0;
@@ -41,18 +42,24 @@ struct PageTable([u64; PAGE_TABLE_ENTRIES]);
 static mut L1_TABLE: PageTable = PageTable([0; PAGE_TABLE_ENTRIES]);
 static mut L2_LOW_TABLE: PageTable = PageTable([0; PAGE_TABLE_ENTRIES]);
 
-pub fn enable_for_sdm670(
+pub fn enable(
     source_start: usize,
     source_end: usize,
     payload: usize,
     image_size: usize,
     fdt: usize,
 ) -> bool {
-    if current_el() != 1 {
+    let Some(source_size) = source_end.checked_sub(source_start) else {
+        return false;
+    };
+    if source_size == 0 || image_size == 0 {
+        return false;
+    }
+    if current_el() != 1 || read_sctlr_el1() & (SCTLR_M | SCTLR_C) != 0 {
         return false;
     }
 
-    invalidate_range(source_start, source_end.saturating_sub(source_start));
+    invalidate_range(source_start, source_size);
     invalidate_range(payload, image_size);
     if let Some((fdt_start, fdt_len)) = raw_fdt_range(fdt) {
         invalidate_range(fdt_start, fdt_len);
@@ -86,7 +93,7 @@ unsafe fn setup_tables() {
         zero_table(l2);
 
         l2.add(UART_WINDOW_L2_INDEX).write_volatile(
-            UART_WINDOW_BASE as u64
+            CACHE_DEVICE_START as u64
                 | PTE_ATTR_DEVICE_NGNRNE
                 | PTE_AF
                 | PTE_PXN
@@ -96,7 +103,11 @@ unsafe fn setup_tables() {
         l1.add(0)
             .write_volatile(l2_low_table_address() as u64 | PTE_TYPE_TABLE);
         l1.add(DRAM_L1_INDEX).write_volatile(
-            DRAM_BASE as u64 | PTE_ATTR_NORMAL | PTE_INNER_SHAREABLE | PTE_AF | PTE_TYPE_BLOCK,
+            CACHE_DRAM_START as u64
+                | PTE_ATTR_NORMAL
+                | PTE_INNER_SHAREABLE
+                | PTE_AF
+                | PTE_TYPE_BLOCK,
         );
     }
 }

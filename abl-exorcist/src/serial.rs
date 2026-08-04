@@ -1,6 +1,14 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
-const UART12_BASE: usize = 0x00a9_0000;
+#[cfg(feature = "serial-sdm670-uart12")]
+const UART_BASE: usize = 0x00a9_0000;
+#[cfg(feature = "serial-sdm670-uart12")]
+const SERIAL_READY_MESSAGE: &str = "ablx: serial sdm670 uart12 ok\n";
+
+#[cfg(all(not(feature = "serial-sdm670-uart12"), feature = "serial-sdm845-uart9"))]
+const UART_BASE: usize = 0x00a8_4000;
+#[cfg(all(not(feature = "serial-sdm670-uart12"), feature = "serial-sdm845-uart9"))]
+const SERIAL_READY_MESSAGE: &str = "ablx: serial sdm845 uart9 ok\n";
 
 const GENI_FORCE_DEFAULT_REG: usize = 0x20;
 const GENI_OUTPUT_CTRL: usize = 0x24;
@@ -38,6 +46,11 @@ const SE_IRQ_EN: usize = 0xe1c;
 const SE_DMA_GENERAL_CFG: usize = 0xe30;
 const SE_DMA_TX_IRQ_CLR: usize = 0xc44;
 const SE_DMA_RX_IRQ_CLR: usize = 0xd44;
+#[cfg(any(
+    feature = "cache-sdm670-experiment",
+    feature = "cache-sdm845-experiment"
+))]
+const MMIO_END_OFFSET: usize = SE_DMA_GENERAL_CFG + core::mem::size_of::<u32>();
 
 const GENI_SE_UART: u32 = 2;
 const FW_REV_PROTOCOL_MASK: u32 = 0xff << 8;
@@ -79,6 +92,14 @@ const PACKING_4X8_CFG1: u32 = 0x000c_3e0e;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
+#[cfg(any(
+    feature = "cache-sdm670-experiment",
+    feature = "cache-sdm845-experiment"
+))]
+pub fn mmio_range() -> (usize, usize) {
+    (UART_BASE, UART_BASE + MMIO_END_OFFSET)
+}
+
 pub fn init() {
     if read_proto() != GENI_SE_UART {
         return;
@@ -104,9 +125,10 @@ pub fn init() {
     write32(SE_UART_TX_STOP_BIT_LEN, 0);
 
     ENABLED.store(true, Ordering::Relaxed);
-    write_str("ablx: serial ok\n");
+    write_str(SERIAL_READY_MESSAGE);
 }
 
+#[inline(never)]
 pub fn write_str(message: &str) {
     if !ENABLED.load(Ordering::Relaxed) {
         return;
@@ -277,11 +299,11 @@ fn clear32(offset: usize, bits: u32) {
 }
 
 fn read32(offset: usize) -> u32 {
-    unsafe { ((UART12_BASE + offset) as *const u32).read_volatile() }
+    unsafe { ((UART_BASE + offset) as *const u32).read_volatile() }
 }
 
 fn write32(offset: usize, value: u32) {
     unsafe {
-        ((UART12_BASE + offset) as *mut u32).write_volatile(value);
+        ((UART_BASE + offset) as *mut u32).write_volatile(value);
     }
 }
