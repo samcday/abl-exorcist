@@ -7,9 +7,21 @@ use core::panic::PanicInfo;
 #[cfg(target_os = "none")]
 core::arch::global_asm!(include_str!("start.S"));
 
-#[cfg(all(target_os = "none", feature = "cache-sdm670-experiment"))]
+#[cfg(all(feature = "serial-sdm670-uart12", feature = "serial-sdm845-uart9"))]
+compile_error!("select at most one abl-exorcist serial target");
+
+#[cfg(all(
+    target_os = "none",
+    any(
+        feature = "cache-sdm670-experiment",
+        feature = "cache-sdm845-experiment"
+    )
+))]
 mod cache;
-#[cfg(all(target_os = "none", feature = "serial-sdm670-uart12"))]
+#[cfg(all(
+    target_os = "none",
+    any(feature = "serial-sdm670-uart12", feature = "serial-sdm845-uart9")
+))]
 mod serial;
 
 #[cfg(target_os = "none")]
@@ -62,6 +74,50 @@ const RAMDISK_INITRD_SIZE_OFFSET: usize = 56;
 const KERNEL_ALIGN: usize = 0x20_0000;
 #[cfg(target_os = "none")]
 const KERNEL_MIN_DESTINATION_OFFSET: usize = 0x0600_0000;
+#[cfg(any(
+    test,
+    all(
+        target_os = "none",
+        any(
+            feature = "cache-sdm670-experiment",
+            feature = "cache-sdm845-experiment"
+        )
+    )
+))]
+const CACHE_DRAM_START: usize = 0x8000_0000;
+#[cfg(any(
+    test,
+    all(
+        target_os = "none",
+        any(
+            feature = "cache-sdm670-experiment",
+            feature = "cache-sdm845-experiment"
+        )
+    )
+))]
+const CACHE_DRAM_END: usize = 0xc000_0000;
+#[cfg(any(
+    test,
+    all(
+        target_os = "none",
+        any(
+            feature = "cache-sdm670-experiment",
+            feature = "cache-sdm845-experiment"
+        )
+    )
+))]
+const CACHE_DEVICE_START: usize = 0x00a0_0000;
+#[cfg(any(
+    test,
+    all(
+        target_os = "none",
+        any(
+            feature = "cache-sdm670-experiment",
+            feature = "cache-sdm845-experiment"
+        )
+    )
+))]
+const CACHE_DEVICE_END: usize = 0x00c0_0000;
 #[cfg(any(target_os = "none", test))]
 const FDT_MAGIC: u32 = 0xd00d_feed;
 #[cfg(any(target_os = "none", test))]
@@ -96,7 +152,6 @@ const ANDROIDBOOT_PREFIX: &[u8] = b"androidboot.";
 #[cfg(target_os = "none")]
 struct KernelPackage {
     source_start: usize,
-    source_end: usize,
     compressed_source: usize,
     compressed_size: usize,
     uncompressed_size: usize,
@@ -174,31 +229,52 @@ fn panic(_info: &PanicInfo<'_>) -> ! {
     halt()
 }
 
-#[cfg(all(target_os = "none", feature = "serial-sdm670-uart12"))]
+#[cfg(all(
+    target_os = "none",
+    any(feature = "serial-sdm670-uart12", feature = "serial-sdm845-uart9")
+))]
 fn serial_init() {
     serial::init();
 }
 
-#[cfg(all(target_os = "none", not(feature = "serial-sdm670-uart12")))]
+#[cfg(all(
+    target_os = "none",
+    not(any(feature = "serial-sdm670-uart12", feature = "serial-sdm845-uart9"))
+))]
 fn serial_init() {}
 
-#[cfg(all(target_os = "none", feature = "serial-sdm670-uart12"))]
+#[cfg(all(
+    target_os = "none",
+    any(feature = "serial-sdm670-uart12", feature = "serial-sdm845-uart9")
+))]
 fn trace(message: &str) {
     serial::write_str(message);
 }
 
-#[cfg(all(target_os = "none", not(feature = "serial-sdm670-uart12")))]
+#[cfg(all(
+    target_os = "none",
+    not(any(feature = "serial-sdm670-uart12", feature = "serial-sdm845-uart9"))
+))]
 fn trace(_message: &str) {}
 
-#[cfg(all(target_os = "none", feature = "serial-sdm670-uart12"))]
+#[cfg(all(
+    target_os = "none",
+    any(feature = "serial-sdm670-uart12", feature = "serial-sdm845-uart9")
+))]
 fn trace_hex(label: &str, value: usize) {
     serial::write_hex(label, value);
 }
 
-#[cfg(all(target_os = "none", not(feature = "serial-sdm670-uart12")))]
+#[cfg(all(
+    target_os = "none",
+    not(any(feature = "serial-sdm670-uart12", feature = "serial-sdm845-uart9"))
+))]
 fn trace_hex(_label: &str, _value: usize) {}
 
-#[cfg(all(target_os = "none", feature = "serial-sdm670-uart12"))]
+#[cfg(all(
+    target_os = "none",
+    any(feature = "serial-sdm670-uart12", feature = "serial-sdm845-uart9")
+))]
 fn trace_system_state() {
     let current_el = read_currentel();
     let sctlr = read_current_sctlr(current_el);
@@ -212,10 +288,16 @@ fn trace_system_state() {
     trace_hex("ablx: cntpct ", counter_ticks());
 }
 
-#[cfg(all(target_os = "none", not(feature = "serial-sdm670-uart12")))]
+#[cfg(all(
+    target_os = "none",
+    not(any(feature = "serial-sdm670-uart12", feature = "serial-sdm845-uart9"))
+))]
 fn trace_system_state() {}
 
-#[cfg(all(target_os = "none", feature = "serial-sdm670-uart12"))]
+#[cfg(all(
+    target_os = "none",
+    any(feature = "serial-sdm670-uart12", feature = "serial-sdm845-uart9")
+))]
 fn trace_counter_elapsed(ticks_label: &str, ms_label: &str, start: usize, end: usize) {
     let ticks = end.wrapping_sub(start);
     trace_hex(ticks_label, ticks);
@@ -226,10 +308,16 @@ fn trace_counter_elapsed(ticks_label: &str, ms_label: &str, start: usize, end: u
     }
 }
 
-#[cfg(all(target_os = "none", not(feature = "serial-sdm670-uart12")))]
+#[cfg(all(
+    target_os = "none",
+    not(any(feature = "serial-sdm670-uart12", feature = "serial-sdm845-uart9"))
+))]
 fn trace_counter_elapsed(_ticks_label: &str, _ms_label: &str, _start: usize, _end: usize) {}
 
-#[cfg(all(target_os = "none", feature = "serial-sdm670-uart12"))]
+#[cfg(all(
+    target_os = "none",
+    any(feature = "serial-sdm670-uart12", feature = "serial-sdm845-uart9")
+))]
 fn counter_ticks_to_ms(ticks: usize, frequency: usize) -> Option<usize> {
     if frequency == 0 {
         return None;
@@ -239,22 +327,43 @@ fn counter_ticks_to_ms(ticks: usize, frequency: usize) -> Option<usize> {
     usize::try_from(ms).ok()
 }
 
-#[cfg(all(target_os = "none", feature = "serial-sdm670-uart12"))]
+#[cfg(all(
+    target_os = "none",
+    any(feature = "serial-sdm670-uart12", feature = "serial-sdm845-uart9")
+))]
 fn counter_ticks() -> usize {
     read_cntpct_el0()
 }
 
-#[cfg(all(target_os = "none", not(feature = "serial-sdm670-uart12")))]
+#[cfg(all(
+    target_os = "none",
+    not(any(feature = "serial-sdm670-uart12", feature = "serial-sdm845-uart9"))
+))]
 fn counter_ticks() -> usize {
     0
 }
 
-#[cfg(all(target_os = "none", feature = "cache-sdm670-experiment"))]
+#[cfg(all(
+    target_os = "none",
+    any(
+        feature = "cache-sdm670-experiment",
+        feature = "cache-sdm845-experiment"
+    )
+))]
 fn enable_cache_experiment(package: &KernelPackage, payload: usize, fdt: usize) -> bool {
     trace("ablx: enable dcache\n");
-    let enabled = cache::enable_for_sdm670(
+    let Some(source_end) = package.source_start.checked_add(package.compressed_size) else {
+        trace("ablx: cache source overflow\n");
+        return false;
+    };
+    if !cache_ranges_supported(package, source_end, payload, fdt) {
+        trace("ablx: cache ranges unsupported\n");
+        return false;
+    }
+
+    let enabled = cache::enable(
         package.source_start,
-        package.source_end,
+        source_end,
         payload,
         package.image_size,
         fdt,
@@ -269,12 +378,87 @@ fn enable_cache_experiment(package: &KernelPackage, payload: usize, fdt: usize) 
     enabled
 }
 
-#[cfg(all(target_os = "none", not(feature = "cache-sdm670-experiment")))]
+#[cfg(all(
+    target_os = "none",
+    not(any(
+        feature = "cache-sdm670-experiment",
+        feature = "cache-sdm845-experiment"
+    ))
+))]
 fn enable_cache_experiment(_package: &KernelPackage, _payload: usize, _fdt: usize) -> bool {
     false
 }
 
-#[cfg(all(target_os = "none", feature = "serial-sdm670-uart12"))]
+#[cfg(all(
+    target_os = "none",
+    any(
+        feature = "cache-sdm670-experiment",
+        feature = "cache-sdm845-experiment"
+    )
+))]
+fn cache_ranges_supported(
+    package: &KernelPackage,
+    source_end: usize,
+    payload: usize,
+    fdt: usize,
+) -> bool {
+    let shim_start = _start as *const () as usize;
+    let Some(shim_size_address) = shim_start.checked_add(ARM64_IMAGE_SIZE_OFFSET) else {
+        return false;
+    };
+    let Ok(shim_size) = usize::try_from(read64(shim_size_address)) else {
+        return false;
+    };
+    let Some(payload_end) = payload.checked_add(package.image_size) else {
+        return false;
+    };
+    let Some((fdt_start, fdt_end)) = raw_fdt_range(fdt) else {
+        return false;
+    };
+
+    sized_range_is_within(shim_start, shim_size, CACHE_DRAM_START, CACHE_DRAM_END)
+        && range_is_within(
+            package.source_start,
+            source_end,
+            CACHE_DRAM_START,
+            CACHE_DRAM_END,
+        )
+        && range_is_within(payload, payload_end, CACHE_DRAM_START, CACHE_DRAM_END)
+        && range_is_within(fdt_start, fdt_end, CACHE_DRAM_START, CACHE_DRAM_END)
+        && !ranges_overlap(package.source_start, source_end, payload, payload_end)
+        && !ranges_overlap(fdt_start, fdt_end, payload, payload_end)
+        && serial_cache_range_supported()
+}
+
+#[cfg(all(
+    target_os = "none",
+    any(
+        feature = "cache-sdm670-experiment",
+        feature = "cache-sdm845-experiment"
+    ),
+    any(feature = "serial-sdm670-uart12", feature = "serial-sdm845-uart9")
+))]
+fn serial_cache_range_supported() -> bool {
+    let (start, end) = serial::mmio_range();
+    range_is_within(start, end, CACHE_DEVICE_START, CACHE_DEVICE_END)
+}
+
+#[cfg(all(
+    target_os = "none",
+    any(
+        feature = "cache-sdm670-experiment",
+        feature = "cache-sdm845-experiment"
+    ),
+    not(any(feature = "serial-sdm670-uart12", feature = "serial-sdm845-uart9"))
+))]
+fn serial_cache_range_supported() -> bool {
+    true
+}
+
+#[cfg(all(
+    target_os = "none",
+    any(feature = "serial-sdm670-uart12", feature = "serial-sdm845-uart9")
+))]
 fn read_currentel() -> usize {
     let value: usize;
     unsafe {
@@ -283,7 +467,10 @@ fn read_currentel() -> usize {
     value
 }
 
-#[cfg(all(target_os = "none", feature = "serial-sdm670-uart12"))]
+#[cfg(all(
+    target_os = "none",
+    any(feature = "serial-sdm670-uart12", feature = "serial-sdm845-uart9")
+))]
 fn read_current_sctlr(current_el: usize) -> usize {
     match (current_el >> 2) & 0x3 {
         1 => read_sctlr_el1(),
@@ -293,7 +480,10 @@ fn read_current_sctlr(current_el: usize) -> usize {
     }
 }
 
-#[cfg(all(target_os = "none", feature = "serial-sdm670-uart12"))]
+#[cfg(all(
+    target_os = "none",
+    any(feature = "serial-sdm670-uart12", feature = "serial-sdm845-uart9")
+))]
 fn read_sctlr_el1() -> usize {
     let value: usize;
     unsafe {
@@ -302,7 +492,10 @@ fn read_sctlr_el1() -> usize {
     value
 }
 
-#[cfg(all(target_os = "none", feature = "serial-sdm670-uart12"))]
+#[cfg(all(
+    target_os = "none",
+    any(feature = "serial-sdm670-uart12", feature = "serial-sdm845-uart9")
+))]
 fn read_sctlr_el2() -> usize {
     let value: usize;
     unsafe {
@@ -311,7 +504,10 @@ fn read_sctlr_el2() -> usize {
     value
 }
 
-#[cfg(all(target_os = "none", feature = "serial-sdm670-uart12"))]
+#[cfg(all(
+    target_os = "none",
+    any(feature = "serial-sdm670-uart12", feature = "serial-sdm845-uart9")
+))]
 fn read_sctlr_el3() -> usize {
     let value: usize;
     unsafe {
@@ -320,7 +516,10 @@ fn read_sctlr_el3() -> usize {
     value
 }
 
-#[cfg(all(target_os = "none", feature = "serial-sdm670-uart12"))]
+#[cfg(all(
+    target_os = "none",
+    any(feature = "serial-sdm670-uart12", feature = "serial-sdm845-uart9")
+))]
 fn read_cntfrq_el0() -> usize {
     let value: usize;
     unsafe {
@@ -329,7 +528,10 @@ fn read_cntfrq_el0() -> usize {
     value
 }
 
-#[cfg(all(target_os = "none", feature = "serial-sdm670-uart12"))]
+#[cfg(all(
+    target_os = "none",
+    any(feature = "serial-sdm670-uart12", feature = "serial-sdm845-uart9")
+))]
 fn read_cntpct_el0() -> usize {
     let value: usize;
     unsafe {
@@ -394,7 +596,6 @@ fn read_kernel_package(source: usize) -> Option<KernelPackage> {
     let end = compressed_source.checked_add(compressed_size)?;
     Some(KernelPackage {
         source_start: compressed_source,
-        source_end: end,
         compressed_source,
         compressed_size,
         uncompressed_size,
@@ -466,12 +667,10 @@ fn read_ramdisk_container(base: usize, ramdisk: &[u8]) -> Option<KernelPackage> 
     }
 
     let compressed_source = base.checked_add(kernel_offset)?;
-    let source_end = compressed_source.checked_add(compressed_size)?;
     let initrd_start = base.checked_add(initrd_offset)?;
     let initrd_end = initrd_start.checked_add(initrd_size)?;
     Some(KernelPackage {
         source_start: compressed_source,
-        source_end,
         compressed_source,
         compressed_size,
         uncompressed_size,
@@ -539,7 +738,8 @@ fn kernel_destination_after_floor(
                 trace_reserved_skip(reserved_start, reserved_end);
                 destination = align_up_checked(reserved_end, KERNEL_ALIGN)?;
             }
-            Ok(None) | Err(_) => return Some(destination),
+            Ok(None) => return Some(destination),
+            Err(_) => return None,
         }
     }
 }
@@ -550,7 +750,7 @@ fn trace_reserved_skip(start: usize, end: usize) {
     trace_hex("ablx: reserved end ", end);
 }
 
-#[cfg(not(target_os = "none"))]
+#[cfg(test)]
 fn trace_reserved_skip(_start: usize, _end: usize) {}
 
 #[cfg(target_os = "none")]
@@ -656,17 +856,15 @@ fn read_lz4_length(input: &[u8], input_pos: &mut usize, mut len: usize) -> Optio
 
 #[cfg(any(target_os = "none", test))]
 fn copy_lz4_match(output: &mut [u8], output_pos: usize, offset: usize, len: usize) {
-    if offset >= len {
-        let source_start = output_pos - offset;
-        let source_end = source_start + len;
-        output.copy_within(source_start..source_end, output_pos);
-        return;
-    }
+    let source_start = output_pos - offset;
+    let initial_len = offset.min(len);
+    output.copy_within(source_start..source_start + initial_len, output_pos);
 
-    let mut copied = 0usize;
+    let mut copied = initial_len;
     while copied < len {
-        output[output_pos + copied] = output[output_pos - offset + copied];
-        copied += 1;
+        let chunk_len = copied.min(len - copied);
+        output.copy_within(output_pos..output_pos + chunk_len, output_pos + copied);
+        copied += chunk_len;
     }
 }
 
@@ -998,21 +1196,20 @@ fn find_reserved_memory_node_overlap(
                     }
                 }
 
-                if let Some(reserved_depth) = reserved_depth {
-                    if depth == reserved_depth + 1
-                        && name == b"reg"
-                        && let Some(range) = find_reg_overlap(
-                            fdt,
-                            value_offset,
-                            len,
-                            reserved_address_cells,
-                            reserved_size_cells,
-                            start,
-                            end,
-                        )?
-                    {
-                        return Ok(Some(range));
-                    }
+                if let Some(reserved_depth) = reserved_depth
+                    && depth == reserved_depth + 1
+                    && name == b"reg"
+                    && let Some(range) = find_reg_overlap(
+                        fdt,
+                        value_offset,
+                        len,
+                        reserved_address_cells,
+                        reserved_size_cells,
+                        start,
+                        end,
+                    )?
+                {
+                    return Ok(Some(range));
                 }
             }
             FDT_NOP => {}
@@ -1090,6 +1287,42 @@ fn read_cells(fdt: &[u8], offset: usize, cells: usize) -> Result<usize, FdtError
 #[cfg(any(target_os = "none", test))]
 fn ranges_overlap(start: usize, end: usize, other_start: usize, other_end: usize) -> bool {
     start < other_end && other_start < end
+}
+
+#[cfg(any(
+    test,
+    all(
+        target_os = "none",
+        any(
+            feature = "cache-sdm670-experiment",
+            feature = "cache-sdm845-experiment"
+        )
+    )
+))]
+fn range_is_within(start: usize, end: usize, mapped_start: usize, mapped_end: usize) -> bool {
+    start < end && mapped_start <= start && end <= mapped_end
+}
+
+#[cfg(any(
+    test,
+    all(
+        target_os = "none",
+        any(
+            feature = "cache-sdm670-experiment",
+            feature = "cache-sdm845-experiment"
+        )
+    )
+))]
+fn sized_range_is_within(
+    start: usize,
+    size: usize,
+    mapped_start: usize,
+    mapped_end: usize,
+) -> bool {
+    let Some(end) = start.checked_add(size) else {
+        return false;
+    };
+    range_is_within(start, end, mapped_start, mapped_end)
 }
 
 #[cfg(any(target_os = "none", test))]
@@ -1658,6 +1891,101 @@ mod tests {
 
         assert_eq!(decompress_lz4_block(&input, &mut out), Some(6));
         assert_eq!(&out, b"aaaaaa");
+    }
+
+    #[test]
+    fn copies_lz4_matches_for_short_and_long_offsets() {
+        const OUTPUT_POS: usize = u16::MAX as usize;
+        let offsets = [1, 2, 3, 7, 8, 15, 16, 255, 256, u16::MAX as usize];
+        let lengths = [1, 4, 15, 16, 31, 32, 63, 64, 255, 256, 1024, 65_537];
+
+        for offset in offsets {
+            for len in lengths {
+                let mut actual = vec![0; OUTPUT_POS + len];
+                for (index, byte) in actual[..OUTPUT_POS].iter_mut().enumerate() {
+                    *byte = (index as u8).wrapping_mul(37).wrapping_add(11);
+                }
+                let mut expected = actual.clone();
+                for index in 0..len {
+                    expected[OUTPUT_POS + index] = expected[OUTPUT_POS + index - offset];
+                }
+
+                copy_lz4_match(&mut actual, OUTPUT_POS, offset, len);
+                assert_eq!(actual, expected, "offset={offset}, len={len}");
+            }
+        }
+    }
+
+    #[test]
+    fn decompresses_lzzzz_raw_blocks() {
+        let inputs = [
+            vec![0; 4096],
+            (0..65_537)
+                .map(|index| (index as u8).wrapping_mul(29).wrapping_add(7))
+                .collect(),
+            b"pocketfed-ablx-".repeat(16_384),
+        ];
+
+        for input in inputs {
+            let mut compressed = Vec::new();
+            lzzzz::lz4_hc::compress_to_vec(&input, &mut compressed, lzzzz::lz4_hc::CLEVEL_MAX)
+                .unwrap();
+            let mut output = vec![0; input.len()];
+
+            assert_eq!(
+                decompress_lz4_block(&compressed, &mut output),
+                Some(input.len())
+            );
+            assert_eq!(output, input);
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_lz4_blocks() {
+        assert_eq!(decompress_lz4_block(&[0xf0], &mut [0; 32]), None);
+        assert_eq!(decompress_lz4_block(&[0x00, 0, 0], &mut [0; 4]), None);
+        assert_eq!(decompress_lz4_block(&[0x10, b'a', 2, 0], &mut [0; 5]), None);
+        assert_eq!(decompress_lz4_block(&[0x10, b'a', 1, 0], &mut [0; 4]), None);
+    }
+
+    #[test]
+    fn validates_cache_mapping_boundaries() {
+        assert!(range_is_within(
+            CACHE_DRAM_START,
+            CACHE_DRAM_END,
+            CACHE_DRAM_START,
+            CACHE_DRAM_END
+        ));
+        assert!(range_is_within(
+            CACHE_DEVICE_START,
+            CACHE_DEVICE_END,
+            CACHE_DEVICE_START,
+            CACHE_DEVICE_END
+        ));
+        assert!(!range_is_within(
+            CACHE_DRAM_START,
+            CACHE_DRAM_START,
+            CACHE_DRAM_START,
+            CACHE_DRAM_END
+        ));
+        assert!(!range_is_within(
+            CACHE_DRAM_START - 1,
+            CACHE_DRAM_START + 1,
+            CACHE_DRAM_START,
+            CACHE_DRAM_END
+        ));
+        assert!(!range_is_within(
+            CACHE_DRAM_END - 1,
+            CACHE_DRAM_END + 1,
+            CACHE_DRAM_START,
+            CACHE_DRAM_END
+        ));
+        assert!(!sized_range_is_within(
+            usize::MAX,
+            2,
+            CACHE_DRAM_START,
+            CACHE_DRAM_END
+        ));
     }
 
     fn cstr(value: &[u8]) -> &[u8] {

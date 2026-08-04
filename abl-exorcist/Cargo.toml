@@ -9,4 +9,9 @@ build = "build.rs"
 [features]
 default = []
 serial-sdm670-uart12 = []
+serial-sdm845-uart9 = []
 cache-sdm670-experiment = []
+cache-sdm845-experiment = []
+
+[dev-dependencies]
+lzzzz = "2.0"

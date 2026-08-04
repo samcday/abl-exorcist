@@ -22,6 +22,41 @@ llvm-objcopy -O binary target/aarch64-unknown-none/release/abl-exorcist abl-exor
 cargo run -p abl-exorcist-assembler -- /path/to/kernel/Image abl-exorcist.bin > /tmp/blessed
 ```
 
+To keep a slow ABL implementation from inflating the full kernel, put only the
+gzip-compressed shim in the Android kernel section and carry the real kernel in
+an ABLX ramdisk container:
+
+```sh
+cargo run -p abl-exorcist-assembler -- \
+    --ramdisk /path/to/kernel/Image /path/to/initramfs.img \
+    > /tmp/ablx-ramdisk.img
+
+gzip -n -9 -c abl-exorcist.bin > /tmp/abl-exorcist.bin.gz
+mkbootimg \
+    --kernel /tmp/abl-exorcist.bin.gz \
+    --ramdisk /tmp/ablx-ramdisk.img \
+    ...
+```
+
+The assembler canonicalizes the kernel to a raw arm64 Image and stores it as a
+raw LZ4 block. The original initramfs is appended unchanged. At boot, the shim
+decompresses the kernel and rewrites the FDT initrd range so Linux sees only the
+original initramfs.
+
+## Hardware features
+
+All hardware-specific behavior is opt-in with Cargo features:
+
+- `serial-sdm670-uart12` traces on GENI UART12 at `0x00a90000`.
+- `serial-sdm845-uart9` traces on GENI UART9 at `0x00a84000`.
+- `cache-sdm670-experiment` and `cache-sdm845-experiment` are opt-in aliases
+  for the same guarded identity-mapped D-cache experiment. Both SoCs currently
+  use the same device and first-GiB DRAM mappings.
+
+Select at most one serial feature. The cache experiment requires an EL1,
+cache-off handoff and refuses to activate unless every live memory range fits
+the identity mappings it installs.
+
 ## But what does it *do*?
 
 For now, two main things:
