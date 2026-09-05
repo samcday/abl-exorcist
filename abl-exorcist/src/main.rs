@@ -205,6 +205,8 @@ pub extern "C" fn abl_exorcist_main(fdt: usize) -> ! {
 
     rewrite_initrd_range_from_raw_fdt(fdt, &package);
     rewrite_bootargs_from_raw_fdt(fdt);
+    #[cfg(feature = "bdaddr-google-sdm670")]
+    rewrite_google_sdm670_bdaddr_from_raw_fdt(fdt);
 
     trace("ablx: clean+invalidate caches\n");
     let clean_start = counter_ticks();
@@ -935,6 +937,27 @@ fn rewrite_initrd_range_from_raw_fdt(fdt: usize, package: &KernelPackage) {
     }
 }
 
+#[cfg(all(target_os = "none", feature = "bdaddr-google-sdm670"))]
+fn rewrite_google_sdm670_bdaddr_from_raw_fdt(fdt: usize) {
+    if fdt == 0 || read_be_u32_raw(fdt) != FDT_MAGIC {
+        trace("ablx: bdaddr: bad fdt\n");
+        return;
+    }
+
+    let totalsize = read_be_u32_raw(fdt + 4) as usize;
+    if totalsize < FDT_HEADER_SIZE {
+        trace("ablx: bdaddr: bad fdt size\n");
+        return;
+    }
+
+    let fdt = unsafe { core::slice::from_raw_parts_mut(fdt as *mut u8, totalsize) };
+    match rewrite_google_sdm670_bdaddr(fdt) {
+        Ok(true) => trace("ablx: bdaddr rewritten\n"),
+        Ok(false) => trace("ablx: bdaddr unchanged\n"),
+        Err(_) => trace("ablx: bdaddr failed\n"),
+    }
+}
+
 #[cfg(target_os = "none")]
 fn read_be_u32_raw(address: usize) -> u32 {
     u32::from_be(unsafe { (address as *const u32).read_unaligned() })
@@ -1346,6 +1369,207 @@ fn rewrite_initrd_range(fdt: &mut [u8], start: usize, end: usize) -> Result<(), 
     write_address_prop(fdt, start_prop, start)?;
     write_address_prop(fdt, end_prop, end)?;
     Ok(())
+}
+
+#[cfg(any(target_os = "none", test))]
+fn rewrite_google_sdm670_bdaddr(fdt: &mut [u8]) -> Result<bool, FdtError> {
+    let target = find_compatible_node_prop(fdt, b"qcom,wcn3990-bt", b"local-bd-address")?;
+    if target.1 != 6 {
+        return Err(FdtError::BadStructure);
+    }
+    let target_end = checked_end(target.0, target.1, fdt.len())?;
+    let target_value = &fdt[target.0..target_end];
+    if target_value.iter().any(|byte| *byte != 0) {
+        return Ok(false);
+    }
+
+    let source = find_node_prop_by_path(
+        fdt,
+        &[&b""[..], &b"chosen"[..], &b"cdt"[..], &b"cdb2"[..]],
+        b"bt_addr",
+    )?;
+    let source_end = checked_end(source.0, source.1, fdt.len())?;
+    let bdaddr = parse_display_bdaddr(&fdt[source.0..source_end])?;
+
+    fdt[target.0..target_end].copy_from_slice(&bdaddr);
+    Ok(true)
+}
+
+#[cfg(any(target_os = "none", test))]
+fn parse_display_bdaddr(value: &[u8]) -> Result<[u8; 6], FdtError> {
+    let value = match value {
+        [text @ .., 0] => text,
+        text => text,
+    };
+    if value.len() != 17 {
+        return Err(FdtError::BadStructure);
+    }
+
+    let mut address = [0u8; 6];
+    for index in 0..6 {
+        let offset = index * 3;
+        if index != 5 && value[offset + 2] != b':' {
+            return Err(FdtError::BadStructure);
+        }
+        let high = hex_nibble(value[offset]).ok_or(FdtError::BadStructure)?;
+        let low = hex_nibble(value[offset + 1]).ok_or(FdtError::BadStructure)?;
+        address[5 - index] = (high << 4) | low;
+    }
+    if address.iter().all(|byte| *byte == 0) {
+        return Err(FdtError::BadStructure);
+    }
+    Ok(address)
+}
+
+#[cfg(any(target_os = "none", test))]
+fn hex_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+#[cfg(any(target_os = "none", test))]
+fn find_node_prop_by_path(
+    fdt: &[u8],
+    path: &[&[u8]],
+    property_name: &[u8],
+) -> Result<(usize, usize), FdtError> {
+    let layout = fdt_layout(fdt)?;
+    let mut pos = layout.struct_offset;
+    let mut depth = 0usize;
+    let mut matched = 0usize;
+
+    while pos < layout.struct_end {
+        let token = be32_at(fdt, pos)?;
+        pos += 4;
+
+        match token {
+            FDT_BEGIN_NODE => {
+                let name_start = pos;
+                while pos < layout.struct_end && fdt[pos] != 0 {
+                    pos += 1;
+                }
+                if pos == layout.struct_end {
+                    return Err(FdtError::BadStructure);
+                }
+                let name = &fdt[name_start..pos];
+                pos = align_up(pos + 1, 4);
+                if matched == depth && depth < path.len() && name == path[depth] {
+                    matched += 1;
+                }
+                depth += 1;
+            }
+            FDT_END_NODE => {
+                if depth == 0 {
+                    return Err(FdtError::BadStructure);
+                }
+                depth -= 1;
+                matched = matched.min(depth);
+            }
+            FDT_PROP => {
+                let len = be32_at(fdt, pos)? as usize;
+                let name_offset = be32_at(fdt, pos + 4)? as usize;
+                pos += 8;
+                let value_offset = pos;
+                let value_end = checked_end(value_offset, len, layout.struct_end)?;
+                pos = align_up(value_end, 4);
+
+                if matched == path.len()
+                    && depth == path.len()
+                    && string_at(fdt, layout.strings_offset, layout.strings_end, name_offset)?
+                        == property_name
+                {
+                    return Ok((value_offset, len));
+                }
+            }
+            FDT_NOP => {}
+            FDT_END => break,
+            _ => return Err(FdtError::BadStructure),
+        }
+    }
+
+    Err(FdtError::NotFound)
+}
+
+#[cfg(any(target_os = "none", test))]
+fn find_compatible_node_prop(
+    fdt: &[u8],
+    compatible: &[u8],
+    property_name: &[u8],
+) -> Result<(usize, usize), FdtError> {
+    let layout = fdt_layout(fdt)?;
+    let mut pos = layout.struct_offset;
+    let mut depth = 0usize;
+    let mut matching_depth = None;
+    let mut candidate = None;
+
+    while pos < layout.struct_end {
+        let token = be32_at(fdt, pos)?;
+        pos += 4;
+
+        match token {
+            FDT_BEGIN_NODE => {
+                while pos < layout.struct_end && fdt[pos] != 0 {
+                    pos += 1;
+                }
+                if pos == layout.struct_end {
+                    return Err(FdtError::BadStructure);
+                }
+                pos = align_up(pos + 1, 4);
+                depth += 1;
+            }
+            FDT_END_NODE => {
+                if depth == 0 {
+                    return Err(FdtError::BadStructure);
+                }
+                if matching_depth == Some(depth) {
+                    matching_depth = None;
+                }
+                if candidate.is_some_and(|(candidate_depth, _, _)| candidate_depth == depth) {
+                    candidate = None;
+                }
+                depth -= 1;
+            }
+            FDT_PROP => {
+                let len = be32_at(fdt, pos)? as usize;
+                let name_offset = be32_at(fdt, pos + 4)? as usize;
+                pos += 8;
+                let value_offset = pos;
+                let value_end = checked_end(value_offset, len, layout.struct_end)?;
+                pos = align_up(value_end, 4);
+
+                let name = string_at(fdt, layout.strings_offset, layout.strings_end, name_offset)?;
+                if name == b"compatible"
+                    && string_list_contains(&fdt[value_offset..value_end], compatible)
+                {
+                    if let Some((candidate_depth, candidate_offset, candidate_len)) = candidate
+                        && candidate_depth == depth
+                    {
+                        return Ok((candidate_offset, candidate_len));
+                    }
+                    matching_depth = Some(depth);
+                } else if name == property_name {
+                    if matching_depth == Some(depth) {
+                        return Ok((value_offset, len));
+                    }
+                    candidate = Some((depth, value_offset, len));
+                }
+            }
+            FDT_NOP => {}
+            FDT_END => break,
+            _ => return Err(FdtError::BadStructure),
+        }
+    }
+
+    Err(FdtError::NotFound)
+}
+
+#[cfg(any(target_os = "none", test))]
+fn string_list_contains(value: &[u8], needle: &[u8]) -> bool {
+    value.split(|byte| *byte == 0).any(|item| item == needle)
 }
 
 #[cfg(any(target_os = "none", test))]
@@ -1846,6 +2070,78 @@ mod tests {
     }
 
     #[test]
+    fn copies_google_sdm670_bdaddr_into_controller_property() {
+        let mut fdt = test_fdt_with_bdaddr(Some(b"12:34:56:78:9A:BC\0"), Some(&[0, 0, 0, 0, 0, 0]));
+
+        assert_eq!(rewrite_google_sdm670_bdaddr(&mut fdt), Ok(true));
+        let (offset, len) =
+            find_compatible_node_prop(&fdt, b"qcom,wcn3990-bt", b"local-bd-address").unwrap();
+        assert_eq!(
+            &fdt[offset..offset + len],
+            &[0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12]
+        );
+    }
+
+    #[test]
+    fn finds_controller_property_before_compatible() {
+        let mut fdt = test_fdt_with_bdaddr_order(
+            Some(b"12:34:56:78:9A:BC\0"),
+            Some(&[0, 0, 0, 0, 0, 0]),
+            true,
+        );
+
+        assert_eq!(rewrite_google_sdm670_bdaddr(&mut fdt), Ok(true));
+        let (offset, len) =
+            find_compatible_node_prop(&fdt, b"qcom,wcn3990-bt", b"local-bd-address").unwrap();
+        assert_eq!(
+            &fdt[offset..offset + len],
+            &[0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12]
+        );
+    }
+
+    #[test]
+    fn preserves_existing_controller_bdaddr() {
+        let existing = [6, 5, 4, 3, 2, 1];
+        let mut fdt = test_fdt_with_bdaddr(None, Some(&existing));
+
+        assert_eq!(rewrite_google_sdm670_bdaddr(&mut fdt), Ok(false));
+        let (offset, len) =
+            find_compatible_node_prop(&fdt, b"qcom,wcn3990-bt", b"local-bd-address").unwrap();
+        assert_eq!(&fdt[offset..offset + len], &existing);
+    }
+
+    #[test]
+    fn rejects_malformed_google_bdaddr() {
+        for source in [
+            &b"00:00:00:00:00:00\0"[..],
+            &b"12-34-56-78-9A-BC\0"[..],
+            &b"12:34:56:78:9A:BG\0"[..],
+            &b"12:34:56:78:9A\0"[..],
+        ] {
+            let mut fdt = test_fdt_with_bdaddr(Some(source), Some(&[0, 0, 0, 0, 0, 0]));
+            assert_eq!(
+                rewrite_google_sdm670_bdaddr(&mut fdt),
+                Err(FdtError::BadStructure)
+            );
+        }
+    }
+
+    #[test]
+    fn requires_google_bdaddr_source_and_target_placeholder() {
+        let mut no_source = test_fdt_with_bdaddr(None, Some(&[0, 0, 0, 0, 0, 0]));
+        assert_eq!(
+            rewrite_google_sdm670_bdaddr(&mut no_source),
+            Err(FdtError::NotFound)
+        );
+
+        let mut no_target = test_fdt_with_bdaddr(Some(b"12:34:56:78:9A:BC\0"), None);
+        assert_eq!(
+            rewrite_google_sdm670_bdaddr(&mut no_target),
+            Err(FdtError::NotFound)
+        );
+    }
+
+    #[test]
     fn missing_initrd_range_is_none() {
         let fdt = test_fdt(b"root=/dev/dm-0\0");
 
@@ -2042,6 +2338,59 @@ mod tests {
         fdt
     }
 
+    fn test_fdt_with_bdaddr(source: Option<&[u8]>, target: Option<&[u8]>) -> Vec<u8> {
+        test_fdt_with_bdaddr_order(source, target, false)
+    }
+
+    fn test_fdt_with_bdaddr_order(
+        source: Option<&[u8]>,
+        target: Option<&[u8]>,
+        target_before_compatible: bool,
+    ) -> Vec<u8> {
+        let mut strings = Vec::new();
+        let source_offset = add_string(&mut strings, b"bt_addr");
+        let compatible_offset = add_string(&mut strings, b"compatible");
+        let target_offset = add_string(&mut strings, b"local-bd-address");
+
+        let mut structure = Vec::new();
+        push_node_start(&mut structure, b"");
+
+        push_node_start(&mut structure, b"chosen");
+        push_node_start(&mut structure, b"cdt");
+        push_node_start(&mut structure, b"cdb2");
+        if let Some(source) = source {
+            push_prop(&mut structure, source_offset, source);
+        }
+        push_node_end(&mut structure);
+        push_node_end(&mut structure);
+        push_node_end(&mut structure);
+
+        push_node_start(&mut structure, b"soc@0");
+        push_node_start(&mut structure, b"geniqup@8c0000");
+        push_node_start(&mut structure, b"serial@898000");
+        push_node_start(&mut structure, b"bluetooth");
+        if target_before_compatible {
+            if let Some(target) = target {
+                push_prop(&mut structure, target_offset, target);
+            }
+            push_prop(&mut structure, compatible_offset, b"qcom,wcn3990-bt\0");
+        } else {
+            push_prop(&mut structure, compatible_offset, b"qcom,wcn3990-bt\0");
+            if let Some(target) = target {
+                push_prop(&mut structure, target_offset, target);
+            }
+        }
+        push_node_end(&mut structure);
+        push_node_end(&mut structure);
+        push_node_end(&mut structure);
+        push_node_end(&mut structure);
+
+        push_node_end(&mut structure);
+        push_be32(&mut structure, FDT_END);
+
+        finish_test_fdt(&[], &structure, &strings)
+    }
+
     fn test_fdt_with_reserved(memreserve: &[(u64, u64)], reserved: &[(u64, u64)]) -> Vec<u8> {
         let mut strings = Vec::new();
         let address_cells_offset = add_string(&mut strings, b"#address-cells");
@@ -2125,6 +2474,19 @@ mod tests {
 
     fn push_u32_prop(out: &mut Vec<u8>, name_offset: u32, value: u32) {
         push_prop(out, name_offset, &value.to_be_bytes());
+    }
+
+    fn push_node_start(out: &mut Vec<u8>, name: &[u8]) {
+        push_be32(out, FDT_BEGIN_NODE);
+        out.extend_from_slice(name);
+        out.push(0);
+        while !out.len().is_multiple_of(4) {
+            out.push(0);
+        }
+    }
+
+    fn push_node_end(out: &mut Vec<u8>) {
+        push_be32(out, FDT_END_NODE);
     }
 
     fn push_prop(out: &mut Vec<u8>, name_offset: u32, value: &[u8]) {
