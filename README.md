@@ -52,6 +52,10 @@ All hardware-specific behavior is opt-in with Cargo features:
 - `cache-sdm670-experiment` and `cache-sdm845-experiment` are opt-in aliases
   for the same guarded identity-mapped D-cache experiment. Both SoCs currently
   use the same device and first-GiB DRAM mappings.
+- `bdaddr-google-sdm670` copies Google's bootloader-provided Bluetooth address
+  from `/chosen/cdt/cdb2/bt_addr` into the standard `local-bd-address`
+  property of the `qcom,wcn3990-bt` controller. The target DT must provide a
+  six-byte placeholder so the fixup never needs to resize the FDT.
 
 Select at most one serial feature. The cache experiment requires an EL1,
 cache-off handoff and refuses to activate unless every live memory range fits
