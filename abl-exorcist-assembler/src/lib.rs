@@ -392,6 +392,142 @@ fn gzip_bytes(bytes: &[u8]) -> Result<Vec<u8>, PayloadError> {
     encoder.finish().map_err(PayloadError::Gzip)
 }
 
+/// A parsed `ABLXRD1` ramdisk container.
+///
+/// Borrows the container so the already-compressed kernel can be carried into a
+/// rebuild without a decompress/recompress round trip, which would otherwise
+/// change bytes that have nothing to do with the edit being made.
+#[cfg(feature = "std")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RamdiskContainer<'a> {
+    pub compression: u32,
+    pub compressed_kernel: &'a [u8],
+    pub uncompressed_size: u64,
+    pub image_size: u64,
+    pub initrd: &'a [u8],
+}
+
+#[cfg(feature = "std")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RamdiskError {
+    BadMagic,
+    BadHeaderLen(u32),
+    Truncated { needed: usize, actual: usize },
+    SectionOutOfBounds { section: &'static str },
+}
+
+#[cfg(feature = "std")]
+impl fmt::Display for RamdiskError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BadMagic => f.write_str("ABLX ramdisk magic is missing"),
+            Self::BadHeaderLen(len) => write!(f, "unexpected ABLX ramdisk header length: {len}"),
+            Self::Truncated { needed, actual } => write!(
+                f,
+                "ABLX ramdisk container is truncated: needs {needed} bytes, has {actual}"
+            ),
+            Self::SectionOutOfBounds { section } => {
+                write!(f, "ABLX ramdisk {section} lies outside the container")
+            }
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for RamdiskError {}
+
+/// Parse an `ABLXRD1` container produced by [`assemble_ramdisk`].
+#[cfg(feature = "std")]
+pub fn parse_ramdisk(container: &[u8]) -> Result<RamdiskContainer<'_>, RamdiskError> {
+    if container.len() < RAMDISK_HEADER_LEN {
+        return Err(RamdiskError::Truncated {
+            needed: RAMDISK_HEADER_LEN,
+            actual: container.len(),
+        });
+    }
+    if &container[..RAMDISK_MAGIC.len()] != RAMDISK_MAGIC {
+        return Err(RamdiskError::BadMagic);
+    }
+    let header_len = u32::from_le_bytes(container[8..12].try_into().unwrap());
+    if header_len as usize != RAMDISK_HEADER_LEN {
+        return Err(RamdiskError::BadHeaderLen(header_len));
+    }
+
+    let read_u64 =
+        |offset: usize| u64::from_le_bytes(container[offset..offset + 8].try_into().unwrap());
+    let compression = u32::from_le_bytes(container[12..16].try_into().unwrap());
+    let kernel_offset = read_u64(16);
+    let compressed_size = read_u64(24);
+    let uncompressed_size = read_u64(32);
+    let image_size = read_u64(40);
+    let initrd_offset = read_u64(48);
+    let initrd_size = read_u64(56);
+
+    let slice = |offset: u64, len: u64, section: &'static str| -> Result<&[u8], RamdiskError> {
+        let start =
+            usize::try_from(offset).map_err(|_| RamdiskError::SectionOutOfBounds { section })?;
+        let len = usize::try_from(len).map_err(|_| RamdiskError::SectionOutOfBounds { section })?;
+        let end = start
+            .checked_add(len)
+            .ok_or(RamdiskError::SectionOutOfBounds { section })?;
+        container
+            .get(start..end)
+            .ok_or(RamdiskError::SectionOutOfBounds { section })
+    };
+
+    Ok(RamdiskContainer {
+        compression,
+        compressed_kernel: slice(kernel_offset, compressed_size, "kernel")?,
+        uncompressed_size,
+        image_size,
+        initrd: slice(initrd_offset, initrd_size, "initrd")?,
+    })
+}
+
+/// Rebuild a container with a different initrd, reusing the compressed kernel.
+#[cfg(feature = "std")]
+pub fn rebuild_ramdisk(
+    parsed: &RamdiskContainer<'_>,
+    initrd: &[u8],
+) -> Result<Vec<u8>, AssembleError> {
+    let compressed_kernel_len = u64::try_from(parsed.compressed_kernel.len())
+        .map_err(|_| AssembleError::SizeOverflow("compressed kernel length"))?;
+    let initrd_len =
+        u64::try_from(initrd.len()).map_err(|_| AssembleError::SizeOverflow("initrd length"))?;
+    let kernel_offset = align_up(RAMDISK_HEADER_LEN as u64, RAMDISK_ALIGN)?;
+    let initrd_offset = align_up(
+        kernel_offset
+            .checked_add(compressed_kernel_len)
+            .ok_or(AssembleError::SizeOverflow("ramdisk kernel bounds"))?,
+        RAMDISK_ALIGN,
+    )?;
+    let output_len = initrd_offset
+        .checked_add(initrd_len)
+        .ok_or(AssembleError::SizeOverflow("ramdisk container length"))?;
+    let kernel_offset = usize::try_from(kernel_offset)
+        .map_err(|_| AssembleError::SizeOverflow("ramdisk kernel offset"))?;
+    let initrd_offset = usize::try_from(initrd_offset)
+        .map_err(|_| AssembleError::SizeOverflow("ramdisk initrd offset"))?;
+    let output_len = usize::try_from(output_len)
+        .map_err(|_| AssembleError::SizeOverflow("ramdisk container length"))?;
+
+    let mut out = Vec::with_capacity(output_len);
+    write_ramdisk_header(
+        &mut out,
+        kernel_offset as u64,
+        compressed_kernel_len,
+        parsed.uncompressed_size,
+        parsed.image_size,
+        initrd_offset as u64,
+        initrd_len,
+    );
+    out.resize(kernel_offset, 0);
+    out.extend_from_slice(parsed.compressed_kernel);
+    out.resize(initrd_offset, 0);
+    out.extend_from_slice(initrd);
+    Ok(out)
+}
+
 #[cfg(feature = "std")]
 fn compress_kernel(kernel: &[u8]) -> Result<Vec<u8>, AssembleError> {
     let mut out = Vec::new();
@@ -651,6 +787,51 @@ mod tests {
         let mut decompressed = vec![0; kernel.len()];
         lzzzz::lz4::decompress(compressed, &mut decompressed).unwrap();
         assert_eq!(decompressed, kernel);
+    }
+
+    #[test]
+    #[cfg(feature = "std")]
+    fn ramdisk_container_round_trips_through_parse() {
+        let kernel = image(0x2000, 256);
+        let initrd = b"the original initrd";
+
+        let container = assemble_ramdisk(&kernel, initrd).unwrap();
+        let parsed = parse_ramdisk(&container).unwrap();
+
+        assert_eq!(parsed.initrd, initrd);
+        assert_eq!(parsed.uncompressed_size, kernel.len() as u64);
+        assert_eq!(parsed.image_size, 0x2000);
+        let mut decompressed = vec![0; kernel.len()];
+        lzzzz::lz4::decompress(parsed.compressed_kernel, &mut decompressed).unwrap();
+        assert_eq!(decompressed, kernel);
+    }
+
+    #[test]
+    #[cfg(feature = "std")]
+    fn rebuilding_with_a_new_initrd_keeps_the_kernel_bytes() {
+        let kernel = image(0x2000, 256);
+        let container = assemble_ramdisk(&kernel, b"small").unwrap();
+        let parsed = parse_ramdisk(&container).unwrap();
+        let original_kernel = parsed.compressed_kernel.to_vec();
+
+        let bigger = vec![0x42u8; 9000];
+        let rebuilt = rebuild_ramdisk(&parsed, &bigger).unwrap();
+        let reparsed = parse_ramdisk(&rebuilt).unwrap();
+
+        assert_eq!(reparsed.initrd, bigger.as_slice());
+        assert_eq!(reparsed.compressed_kernel, original_kernel.as_slice());
+        assert_eq!(reparsed.uncompressed_size, parsed.uncompressed_size);
+        assert_eq!(reparsed.image_size, parsed.image_size);
+    }
+
+    #[test]
+    #[cfg(feature = "std")]
+    fn parse_ramdisk_rejects_a_foreign_container() {
+        assert_eq!(parse_ramdisk(&[0u8; 96]), Err(RamdiskError::BadMagic));
+        assert!(matches!(
+            parse_ramdisk(b"ABLXRD1\0"),
+            Err(RamdiskError::Truncated { .. })
+        ));
     }
 
     #[test]
