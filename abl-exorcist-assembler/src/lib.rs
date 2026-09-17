@@ -7,7 +7,10 @@ use core::fmt;
 #[cfg(feature = "std")]
 use alloc::vec::Vec;
 #[cfg(feature = "std")]
-use std::io::Read;
+use std::io::{Read, Write};
+
+#[cfg(feature = "std")]
+pub mod bootimg;
 
 const ARM64_IMAGE_MIN_SIZE: usize = 64;
 const ARM64_IMAGE_SIZE_OFFSET: usize = 16;
@@ -290,6 +293,103 @@ pub fn assemble_ramdisk(kernel: &[u8], initrd: &[u8]) -> Result<Vec<u8>, Assembl
     out.resize(initrd_offset, 0);
     out.extend_from_slice(initrd);
     Ok(out)
+}
+
+#[cfg(feature = "std")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AblxMode {
+    KernelWrap,
+    Ramdisk,
+}
+
+#[cfg(feature = "std")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AblxPayload {
+    /// Bytes for the Android boot image's kernel section.
+    pub kernel_section: Vec<u8>,
+    /// Bytes for the Android boot image's ramdisk section.
+    pub ramdisk_section: Vec<u8>,
+}
+
+#[cfg(feature = "std")]
+#[derive(Debug)]
+pub enum PayloadError {
+    Kernel(KernelImageError),
+    Assemble(AssembleError),
+    Gzip(std::io::Error),
+}
+
+#[cfg(feature = "std")]
+impl fmt::Display for PayloadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Kernel(err) => write!(f, "{err}"),
+            Self::Assemble(err) => write!(f, "{err}"),
+            Self::Gzip(err) => write!(f, "compress shim with gzip: {err}"),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for PayloadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Kernel(err) => Some(err),
+            Self::Assemble(err) => Some(err),
+            Self::Gzip(err) => Some(err),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl From<KernelImageError> for PayloadError {
+    fn from(err: KernelImageError) -> Self {
+        Self::Kernel(err)
+    }
+}
+
+#[cfg(feature = "std")]
+impl From<AssembleError> for PayloadError {
+    fn from(err: AssembleError) -> Self {
+        Self::Assemble(err)
+    }
+}
+
+/// Build the kernel and ramdisk sections of an Android boot image from a
+/// boot profile's kernel, initrd and abl-exorcist shim.
+#[cfg(feature = "std")]
+pub fn assemble_payload(
+    kernel: &[u8],
+    initrd: Option<&[u8]>,
+    mode: AblxMode,
+    shim: &[u8],
+) -> Result<AblxPayload, PayloadError> {
+    let kernel = canonicalize_kernel(kernel)?;
+
+    match mode {
+        AblxMode::KernelWrap => Ok(AblxPayload {
+            kernel_section: assemble(&kernel, shim)?,
+            ramdisk_section: initrd.unwrap_or(&[]).to_vec(),
+        }),
+        AblxMode::Ramdisk => {
+            // ABL expects a raw arm64 Image in the gzipped kernel section, so
+            // reject a wrong file here instead of on the device.
+            arm64_image_size(shim, ImageKind::Shim)?;
+            Ok(AblxPayload {
+                kernel_section: gzip_bytes(shim)?,
+                ramdisk_section: assemble_ramdisk(&kernel, initrd.unwrap_or(&[]))?,
+            })
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+fn gzip_bytes(bytes: &[u8]) -> Result<Vec<u8>, PayloadError> {
+    let mut encoder = flate2::GzBuilder::new()
+        .mtime(0)
+        .write(Vec::new(), flate2::Compression::best());
+    encoder.write_all(bytes).map_err(PayloadError::Gzip)?;
+    encoder.finish().map_err(PayloadError::Gzip)
 }
 
 #[cfg(feature = "std")]
@@ -619,6 +719,72 @@ mod tests {
         let zboot = linux_zboot(b"zstd", &compressed);
 
         assert_eq!(canonicalize_kernel(&zboot).unwrap(), image);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn assemble_payload_ramdisk_gzips_shim_and_wraps_kernel() {
+        let kernel = image(0x2000, 256);
+        let initrd = b"initrd payload";
+        let shim = image(0x1000, 128);
+
+        let payload = assemble_payload(&kernel, Some(initrd), AblxMode::Ramdisk, &shim).unwrap();
+
+        assert_eq!(
+            &payload.ramdisk_section[..RAMDISK_MAGIC.len()],
+            RAMDISK_MAGIC
+        );
+        let mut decoder = flate2::read::GzDecoder::new(payload.kernel_section.as_slice());
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed).unwrap();
+        assert_eq!(decompressed, shim);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn assemble_payload_kernel_wrap_places_package_after_shim() {
+        let kernel = image(0x2000, 256);
+        let initrd = b"initrd payload";
+        let shim = image(0x1000, 128);
+
+        let payload = assemble_payload(&kernel, Some(initrd), AblxMode::KernelWrap, &shim).unwrap();
+
+        assert_eq!(&payload.kernel_section[..shim.len()], shim.as_slice());
+        let package_offset = PACKAGE_ALIGN as usize;
+        assert_eq!(
+            &payload.kernel_section[package_offset..package_offset + PACKAGE_MAGIC.len()],
+            PACKAGE_MAGIC
+        );
+        assert_eq!(payload.ramdisk_section, initrd);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn assemble_payload_is_deterministic() {
+        let kernel = image(0x2000, 256);
+        let initrd = b"initrd payload";
+        let shim = image(0x1000, 128);
+
+        let first = assemble_payload(&kernel, Some(initrd), AblxMode::Ramdisk, &shim).unwrap();
+        let second = assemble_payload(&kernel, Some(initrd), AblxMode::Ramdisk, &shim).unwrap();
+
+        assert_eq!(first, second);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn assemble_payload_rejects_a_shim_that_is_not_an_arm64_image() {
+        let kernel = image(0x2000, 256);
+        let shim = vec![0x5a; 128];
+
+        let err = assemble_payload(&kernel, None, AblxMode::Ramdisk, &shim).unwrap_err();
+
+        assert!(matches!(
+            err,
+            PayloadError::Assemble(AssembleError::NotArm64Image {
+                image: ImageKind::Shim
+            })
+        ));
     }
 
     fn image(image_size: u64, file_len: usize) -> Vec<u8> {
