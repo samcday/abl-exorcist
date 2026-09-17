@@ -198,8 +198,8 @@ fn run_bootimg_verify(mut args: impl Iterator<Item = OsString>) -> Result<(), St
     let stdout = io::stdout();
     let mut out = BufWriter::new(stdout.lock());
     for line in [
-        format!("page_size={}", parsed.page_size),
-        format!("header_version={}", parsed.header_version),
+        format!("page_size={}", parsed.header.page_size),
+        format!("header_version={}", parsed.header.header_version()),
         format!("kernel_offset={}", parsed.kernel.offset),
         format!("kernel_size={}", parsed.kernel.len),
         format!("ramdisk_offset={}", parsed.ramdisk.offset),
@@ -212,7 +212,7 @@ fn run_bootimg_verify(mut args: impl Iterator<Item = OsString>) -> Result<(), St
         format!("dtb_size={}", parsed.dtb.len),
         format!("total_len={}", parsed.total_len),
         format!("cmdline={}", parsed.cmdline),
-        format!("id={}", hex_encode(&parsed.id[..20])),
+        format!("id={}", hex_encode(&parsed.header.hash_digest[..20])),
     ] {
         writeln!(out, "{line}").map_err(|err| format!("write verification output: {err}"))?;
     }
