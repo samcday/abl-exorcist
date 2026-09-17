@@ -279,15 +279,16 @@ pub fn assemble_ramdisk(kernel: &[u8], initrd: &[u8]) -> Result<Vec<u8>, Assembl
         .map_err(|_| AssembleError::SizeOverflow("ramdisk container length"))?;
 
     let mut out = Vec::with_capacity(output_len);
-    write_ramdisk_header(
-        &mut out,
-        kernel_offset as u64,
-        compressed_kernel_len,
-        kernel_file_len,
-        kernel_size,
-        initrd_offset as u64,
-        initrd_len,
-    );
+    RamdiskHeader {
+        compression: PACKAGE_COMPRESSION_LZ4,
+        kernel_offset: kernel_offset as u64,
+        compressed_size: compressed_kernel_len,
+        uncompressed_size: kernel_file_len,
+        image_size: kernel_size,
+        initrd_offset: initrd_offset as u64,
+        initrd_size: initrd_len,
+    }
+    .write(&mut out);
     out.resize(kernel_offset, 0);
     out.extend_from_slice(&compressed_kernel);
     out.resize(initrd_offset, 0);
@@ -512,15 +513,18 @@ pub fn rebuild_ramdisk(
         .map_err(|_| AssembleError::SizeOverflow("ramdisk container length"))?;
 
     let mut out = Vec::with_capacity(output_len);
-    write_ramdisk_header(
-        &mut out,
-        kernel_offset as u64,
-        compressed_kernel_len,
-        parsed.uncompressed_size,
-        parsed.image_size,
-        initrd_offset as u64,
-        initrd_len,
-    );
+    // The kernel bytes are carried over untouched, so the header must keep
+    // saying how they were compressed.
+    RamdiskHeader {
+        compression: parsed.compression,
+        kernel_offset: kernel_offset as u64,
+        compressed_size: compressed_kernel_len,
+        uncompressed_size: parsed.uncompressed_size,
+        image_size: parsed.image_size,
+        initrd_offset: initrd_offset as u64,
+        initrd_size: initrd_len,
+    }
+    .write(&mut out);
     out.resize(kernel_offset, 0);
     out.extend_from_slice(parsed.compressed_kernel);
     out.resize(initrd_offset, 0);
@@ -554,28 +558,34 @@ fn write_package_header(
     debug_assert_eq!(out.len() - start_len, PACKAGE_HEADER_LEN);
 }
 
+/// The fields of an `ABLXRD1` container header.
 #[cfg(feature = "std")]
-fn write_ramdisk_header(
-    out: &mut Vec<u8>,
+struct RamdiskHeader {
+    compression: u32,
     kernel_offset: u64,
     compressed_size: u64,
     uncompressed_size: u64,
     image_size: u64,
     initrd_offset: u64,
     initrd_size: u64,
-) {
-    let start_len = out.len();
-    out.extend_from_slice(RAMDISK_MAGIC);
-    out.extend_from_slice(&(RAMDISK_HEADER_LEN as u32).to_le_bytes());
-    out.extend_from_slice(&PACKAGE_COMPRESSION_LZ4.to_le_bytes());
-    out.extend_from_slice(&kernel_offset.to_le_bytes());
-    out.extend_from_slice(&compressed_size.to_le_bytes());
-    out.extend_from_slice(&uncompressed_size.to_le_bytes());
-    out.extend_from_slice(&image_size.to_le_bytes());
-    out.extend_from_slice(&initrd_offset.to_le_bytes());
-    out.extend_from_slice(&initrd_size.to_le_bytes());
-    out.extend_from_slice(&0u64.to_le_bytes());
-    debug_assert_eq!(out.len() - start_len, RAMDISK_HEADER_LEN);
+}
+
+#[cfg(feature = "std")]
+impl RamdiskHeader {
+    fn write(&self, out: &mut Vec<u8>) {
+        let start_len = out.len();
+        out.extend_from_slice(RAMDISK_MAGIC);
+        out.extend_from_slice(&(RAMDISK_HEADER_LEN as u32).to_le_bytes());
+        out.extend_from_slice(&self.compression.to_le_bytes());
+        out.extend_from_slice(&self.kernel_offset.to_le_bytes());
+        out.extend_from_slice(&self.compressed_size.to_le_bytes());
+        out.extend_from_slice(&self.uncompressed_size.to_le_bytes());
+        out.extend_from_slice(&self.image_size.to_le_bytes());
+        out.extend_from_slice(&self.initrd_offset.to_le_bytes());
+        out.extend_from_slice(&self.initrd_size.to_le_bytes());
+        out.extend_from_slice(&0u64.to_le_bytes());
+        debug_assert_eq!(out.len() - start_len, RAMDISK_HEADER_LEN);
+    }
 }
 
 #[cfg(feature = "std")]
@@ -822,6 +832,22 @@ mod tests {
         assert_eq!(reparsed.compressed_kernel, original_kernel.as_slice());
         assert_eq!(reparsed.uncompressed_size, parsed.uncompressed_size);
         assert_eq!(reparsed.image_size, parsed.image_size);
+    }
+
+    #[test]
+    #[cfg(feature = "std")]
+    fn rebuilding_preserves_a_foreign_compression_word() {
+        // The kernel bytes are copied through untouched, so a container that
+        // says they are not LZ4 must still say so afterwards, or the device
+        // would decompress them with the wrong algorithm.
+        let kernel = image(0x2000, 256);
+        let mut container = assemble_ramdisk(&kernel, b"initrd").unwrap();
+        container[12..16].copy_from_slice(&0x7777u32.to_le_bytes());
+        let parsed = parse_ramdisk(&container).unwrap();
+        assert_eq!(parsed.compression, 0x7777);
+
+        let rebuilt = rebuild_ramdisk(&parsed, b"another initrd").unwrap();
+        assert_eq!(parse_ramdisk(&rebuilt).unwrap().compression, 0x7777);
     }
 
     #[test]
