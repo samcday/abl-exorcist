@@ -65,12 +65,28 @@ impl fmt::Display for ImageKind {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AssembleError {
-    ImageTooSmall { image: ImageKind, size: usize },
-    NotArm64Image { image: ImageKind },
-    ZeroImageSize { image: ImageKind },
-    ShimTooLarge { len: u64, payload_offset: u64 },
-    KernelLargerThanImageSize { len: u64, image_size: u64 },
+    ImageTooSmall {
+        image: ImageKind,
+        size: usize,
+    },
+    NotArm64Image {
+        image: ImageKind,
+    },
+    ZeroImageSize {
+        image: ImageKind,
+    },
+    ShimTooLarge {
+        len: u64,
+        payload_offset: u64,
+    },
+    KernelLargerThanImageSize {
+        len: u64,
+        image_size: u64,
+    },
     CompressKernel,
+    /// The shim refuses a container whose initrd is empty, so building one
+    /// would only defer the failure to the device.
+    EmptyInitrd,
     InvalidAlignment(u64),
     SizeOverflow(&'static str),
 }
@@ -102,6 +118,7 @@ impl fmt::Display for AssembleError {
                 f,
                 "alignment must be a non-zero power of two: 0x{alignment:x}"
             ),
+            Self::EmptyInitrd => f.write_str("ramdisk container needs a non-empty initrd"),
             Self::SizeOverflow(description) => write!(f, "{description} overflows u64/usize"),
         }
     }
@@ -246,6 +263,9 @@ pub fn assemble(kernel: &[u8], shim: &[u8]) -> Result<Vec<u8>, AssembleError> {
 
 #[cfg(feature = "std")]
 pub fn assemble_ramdisk(kernel: &[u8], initrd: &[u8]) -> Result<Vec<u8>, AssembleError> {
+    if initrd.is_empty() {
+        return Err(AssembleError::EmptyInitrd);
+    }
     let kernel_size = arm64_image_size(kernel, ImageKind::Kernel)?;
     let kernel_file_len = u64::try_from(kernel.len())
         .map_err(|_| AssembleError::SizeOverflow("kernel file length"))?;
@@ -491,6 +511,9 @@ pub fn rebuild_ramdisk(
     parsed: &RamdiskContainer<'_>,
     initrd: &[u8],
 ) -> Result<Vec<u8>, AssembleError> {
+    if initrd.is_empty() {
+        return Err(AssembleError::EmptyInitrd);
+    }
     let compressed_kernel_len = u64::try_from(parsed.compressed_kernel.len())
         .map_err(|_| AssembleError::SizeOverflow("compressed kernel length"))?;
     let initrd_len =
@@ -765,6 +788,27 @@ mod tests {
         let mut decompressed = vec![0; kernel.len()];
         lzzzz::lz4::decompress(compressed, &mut decompressed).unwrap();
         assert_eq!(decompressed, kernel);
+    }
+
+    #[test]
+    #[cfg(feature = "std")]
+    fn ramdisk_containers_refuse_an_empty_initrd() {
+        let kernel = image(0x2000, 256);
+        assert_eq!(
+            assemble_ramdisk(&kernel, &[]).unwrap_err(),
+            AssembleError::EmptyInitrd
+        );
+        assert!(matches!(
+            assemble_payload(&kernel, None, AblxMode::Ramdisk, &image(0x1000, 128)),
+            Err(PayloadError::Assemble(AssembleError::EmptyInitrd))
+        ));
+
+        let container = assemble_ramdisk(&kernel, b"initrd").unwrap();
+        let parsed = parse_ramdisk(&container).unwrap();
+        assert_eq!(
+            rebuild_ramdisk(&parsed, &[]).unwrap_err(),
+            AssembleError::EmptyInitrd
+        );
     }
 
     #[test]
