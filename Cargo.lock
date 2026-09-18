@@ -22,9 +22,8 @@ dependencies = [
 
 [[package]]
 name = "abootimg-oxide"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81fe990e3b9a3fb4595a06809f54104e0adb7a4332f403ab2d4cab82404a7a32"
+version = "0.5.1"
+source = "git+https://github.com/samcday/abootimg-oxide?rev=39543c29358c8b0d0533a85a42ed6b0a147417ed#39543c29358c8b0d0533a85a42ed6b0a147417ed"
 dependencies = [
  "binrw",
  "digest",

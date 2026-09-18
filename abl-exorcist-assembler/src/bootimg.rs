@@ -9,7 +9,6 @@
 
 use core::fmt;
 
-use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -20,11 +19,10 @@ use sha1::Sha1;
 /// Size of the Android boot image v2 header in bytes.
 pub const HEADER_V2_SIZE: u32 = 1660;
 /// Bytes available for the command line: 511 + 1023.
-pub const CMDLINE_CAPACITY: usize = CMDLINE_FIELD_SIZE - 1 + EXTRA_CMDLINE_FIELD_SIZE - 1;
+pub const CMDLINE_CAPACITY: usize = HeaderV0::CMDLINE_MAX_LEN;
 
 const HEADER_VERSION_OFFSET: usize = 40;
 const CMDLINE_FIELD_SIZE: usize = 512;
-const EXTRA_CMDLINE_FIELD_SIZE: usize = 1024;
 const SHA1_SIZE: usize = 20;
 
 // Section positions are computed in usize from u32 sizes; five of them
@@ -162,7 +160,7 @@ pub struct Repack<'a> {
 pub fn parse(image: &[u8]) -> Result<BootImage, BootImgError> {
     let header = read_header(image)?;
     let mut parsed = BootImage::new(header)?;
-    parsed.cmdline = cmdline_text(&parsed.header.cmdline[..]);
+    parsed.cmdline = String::from_utf8_lossy(&parsed.header.cmdline_bytes()).into_owned();
 
     for (name, section) in parsed.sections() {
         let end = section
@@ -186,7 +184,7 @@ pub fn repack(template: &[u8], req: &Repack<'_>) -> Result<Vec<u8>, BootImgError
     let parsed = parse(template)?;
     parsed.check_complete(template.len())?;
 
-    let recovery_offset = recovery_dtbo_offset(&parsed.header);
+    let recovery_offset = parsed.header.recovery_dtbo_offset();
     if parsed.recovery_dtbo.len != 0 && recovery_offset != parsed.recovery_dtbo.offset as u64 {
         return Err(BootImgError::RecoveryOffsetMismatch {
             header: recovery_offset,
@@ -224,10 +222,9 @@ pub fn repack(template: &[u8], req: &Repack<'_>) -> Result<Vec<u8>, BootImgError
         if bytes.iter().any(|byte| matches!(*byte, 0 | b'\n' | b'\r')) {
             return Err(BootImgError::CmdlineForbiddenCharacter);
         }
-        if bytes.len() > CMDLINE_CAPACITY {
-            return Err(BootImgError::CmdlineTooLong(bytes.len()));
-        }
-        header.cmdline = cmdline_fields(bytes);
+        header
+            .set_cmdline(bytes)
+            .map_err(|err| BootImgError::CmdlineTooLong(err.len))?;
     }
 
     header.hash_digest = hash_digest(kernel, ramdisk, second, recovery, dtb)?;
@@ -235,7 +232,7 @@ pub fn repack(template: &[u8], req: &Repack<'_>) -> Result<Vec<u8>, BootImgError
     let layout = BootImage::new(header)?;
     let mut header = layout.header;
     if !recovery.is_empty() {
-        set_recovery_dtbo_offset(&mut header, layout.recovery_dtbo.offset as u64);
+        header.set_recovery_dtbo_offset(layout.recovery_dtbo.offset as u64);
     }
 
     let mut out = Vec::with_capacity(layout.total_len);
@@ -307,16 +304,11 @@ impl BootImage {
     /// Lay out the sections a header describes. The command line is left
     /// empty; [`parse`] fills it.
     fn new(header: HeaderV0) -> Result<Self, BootImgError> {
-        let HeaderV0Versioned::V2 {
-            recovery_dtbo_size,
-            dtb_size,
-            ..
-        } = header.versioned
-        else {
+        if !matches!(header.versioned, HeaderV0Versioned::V2 { .. }) {
             return Err(BootImgError::UnsupportedHeaderVersion(
                 header.header_version(),
             ));
-        };
+        }
         // The position helpers divide by the page size, so this has to come first.
         if header.page_size < HEADER_V2_SIZE || !header.page_size.is_power_of_two() {
             return Err(BootImgError::BadPageSize(header.page_size));
@@ -325,15 +317,6 @@ impl BootImage {
             offset,
             len: len as usize,
         };
-        let recovery_dtbo = section(header.recovery_dtbo_position(), recovery_dtbo_size);
-        // abootimg-oxide 0.5.2's dtb_position() and boot_image_size() forget
-        // the second-stage payload when placing the DTB, so the last two
-        // positions are derived here from the (correct) recovery position.
-        let page_align = |end: usize| end + header.get_padding_for(end);
-        let dtb = section(
-            page_align(recovery_dtbo.offset + recovery_dtbo.len),
-            dtb_size,
-        );
         Ok(Self {
             kernel: section(header.kernel_position(), header.kernel_size),
             ramdisk: section(header.ramdisk_position(), header.ramdisk_size),
@@ -341,9 +324,14 @@ impl BootImage {
                 header.second_bootloader_position(),
                 header.second_bootloader_size,
             ),
-            total_len: page_align(dtb.offset + dtb.len),
-            recovery_dtbo,
-            dtb,
+            recovery_dtbo: section(header.recovery_dtbo_position(), header.recovery_dtbo_size()),
+            dtb: section(
+                header
+                    .dtb_position()
+                    .ok_or(BootImgError::UnsupportedHeaderVersion(1))?,
+                header.dtb_size(),
+            ),
+            total_len: header.boot_image_size(),
             cmdline: String::new(),
             header,
         })
@@ -409,41 +397,6 @@ fn read_header(image: &[u8]) -> Result<HeaderV0, BootImgError> {
     })
 }
 
-trait PagePadding {
-    fn get_padding_for(&self, size: usize) -> usize;
-}
-
-impl PagePadding for HeaderV0 {
-    fn get_padding_for(&self, size: usize) -> usize {
-        let page = self.page_size as usize;
-        (page - size % page) % page
-    }
-}
-
-fn recovery_dtbo_offset(header: &HeaderV0) -> u64 {
-    match header.versioned {
-        HeaderV0Versioned::V1 {
-            recovery_dtbo_addr, ..
-        }
-        | HeaderV0Versioned::V2 {
-            recovery_dtbo_addr, ..
-        } => recovery_dtbo_addr,
-        HeaderV0Versioned::V0 => 0,
-    }
-}
-
-fn set_recovery_dtbo_offset(header: &mut HeaderV0, offset: u64) {
-    if let HeaderV0Versioned::V1 {
-        recovery_dtbo_addr, ..
-    }
-    | HeaderV0Versioned::V2 {
-        recovery_dtbo_addr, ..
-    } = &mut header.versioned
-    {
-        *recovery_dtbo_addr = offset;
-    }
-}
-
 /// The `id` digest over the five payloads, SHA-1 in the first 20 bytes.
 fn hash_digest(
     kernel: &[u8],
@@ -462,32 +415,6 @@ fn hash_digest(
         Some(&mut dtb),
     )
     .map_err(|_| BootImgError::SizeOverflow("payload length"))
-}
-
-fn cmdline_text(fields: &[u8]) -> String {
-    let (cmdline, extra_cmdline) = fields.split_at(CMDLINE_FIELD_SIZE);
-    let mut text = nul_terminated(cmdline);
-    text.push_str(&nul_terminated(extra_cmdline));
-    text
-}
-
-fn nul_terminated(field: &[u8]) -> String {
-    let end = field
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(field.len());
-    String::from_utf8_lossy(&field[..end]).into_owned()
-}
-
-/// Split a command line over the `cmdline` and `extra_cmdline` fields, each
-/// kept NUL-terminated. `content` must fit [`CMDLINE_CAPACITY`].
-fn cmdline_fields(content: &[u8]) -> Box<[u8; CMDLINE_FIELD_SIZE + EXTRA_CMDLINE_FIELD_SIZE]> {
-    debug_assert!(content.len() <= CMDLINE_CAPACITY);
-    let mut fields = Box::new([0u8; CMDLINE_FIELD_SIZE + EXTRA_CMDLINE_FIELD_SIZE]);
-    let (head, tail) = content.split_at(content.len().min(CMDLINE_FIELD_SIZE - 1));
-    fields[..head.len()].copy_from_slice(head);
-    fields[CMDLINE_FIELD_SIZE..CMDLINE_FIELD_SIZE + tail.len()].copy_from_slice(tail);
-    fields
 }
 
 fn verify_cmdline_field(field: &[u8]) -> Result<(), BootImgError> {
@@ -516,6 +443,7 @@ fn collapse_whitespace(input: &str) -> String {
 mod tests {
     use super::*;
     use abootimg_oxide::OsVersionPatch;
+    use alloc::boxed::Box;
     use sha1::Digest;
 
     const PAGE_SIZE: u32 = 4096;
@@ -560,7 +488,7 @@ mod tests {
             page_size: PAGE_SIZE,
             osversionpatch: OsVersionPatch(0),
             board_name: [0; 16],
-            cmdline: cmdline_fields(cmdline.as_bytes()),
+            cmdline: Box::new([0; 512 + 1024]),
             hash_digest: hash_digest(kernel, ramdisk, second, recovery, dtb).unwrap(),
             versioned: HeaderV0Versioned::V2 {
                 recovery_dtbo_size: recovery.len() as u32,
@@ -573,6 +501,9 @@ mod tests {
                 dtb_addr: 0,
             },
         };
+
+        let mut header = header;
+        header.set_cmdline(cmdline.as_bytes()).unwrap();
 
         let mut image = Vec::with_capacity(total);
         header.write(&mut Cursor::new(&mut image)).unwrap();
@@ -636,7 +567,7 @@ mod tests {
             align_up(parsed.ramdisk.offset + parsed.ramdisk.len)
         );
         assert_eq!(
-            recovery_dtbo_offset(&parsed.header),
+            parsed.header.recovery_dtbo_offset(),
             parsed.recovery_dtbo.offset as u64,
             "recovery DTBO offset follows the relaid payloads"
         );
