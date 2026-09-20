@@ -30,11 +30,13 @@ let ramdisk = abl_exorcist_assembler::assemble_ramdisk(&kernel, initrd)?;
 
 The assembly functions `assemble(kernel, shim)` and
 `assemble_ramdisk(kernel, initrd)` take an already-normalized raw ARM64 `Image`
-and return owned payload bytes. Both functions, kernel normalization, and the
-CLI currently require the default `std` feature.
+and return owned payload bytes. Both assembly functions support `no_std + alloc`
+with `default-features = false`. Kernel normalization and the CLI require the
+default `std` feature. `assemble_ramdisk` requires a nonempty initrd.
 
-Assembly compresses the kernel as a raw LZ4 block using LZ4 HC. The initrd bytes
-pass through unchanged.
+Assembly compresses the kernel as a raw LZ4 block using the portable Rust
+`lz4_flex` encoder. This uses ordinary LZ4 rather than LZ4 HC, so payloads may
+be larger than with the previous encoder. The initrd bytes pass through unchanged.
 
 Run `abl-exorcist-assembler --help` for usage or `--version` for its version.
 Generate the manual page with `cargo build -p abl-exorcist-assembler --features manpage`.
