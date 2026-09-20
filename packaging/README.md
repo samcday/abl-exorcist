@@ -3,11 +3,12 @@
 This is a packaging draft, not a validated Fedora or COPR build. It is intended
 to build against Fedora's packaged Rust crates and system `libzstd`, without a
 Cargo vendor archive. LZ4 compression uses the portable Rust `lz4_flex` crate;
-there is no `liblz4` dependency.
+there is no `liblz4` dependency. The RPM build enables the `manpage` feature
+and installs the generated manual from Cargo's build output.
 
 Before marking this ready:
 
-- Check `lz4_flex`, `flate2`, `zstd`, and their transitive dependencies in each
+- Check `clap`, `clap_mangen`, `lz4_flex`, `flate2`, `zstd`, and their transitive dependencies in each
   intended build root; no Fedora/EPEL version range is confirmed yet.
 - Run the SRPM and RPM builds in COPR and resolve any macro/tooling requirements.
 - Regenerate the spec's dependency license expression from the resolved packages.

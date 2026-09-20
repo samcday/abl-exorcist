@@ -36,17 +36,17 @@ partition writes, and flashing are handled by higher-level consumers.
 %cargo_prep
 
 %generate_buildrequires
-%cargo_generate_buildrequires
+%cargo_generate_buildrequires -f manpage
 
 %build
-%cargo_build
+%cargo_build -f manpage
 %{cargo_license_summary}
 %{cargo_license} > LICENSE.dependencies
 
 %install
 install -Dpm0755 target/rpm/abl-exorcist-assembler \
     %{buildroot}%{_bindir}/abl-exorcist-assembler
-install -Dpm0644 abl-exorcist-assembler.1 \
+install -Dpm0644 target/rpm/build/abl-exorcist-assembler-*/out/abl-exorcist-assembler.1 \
     %{buildroot}%{_mandir}/man1/abl-exorcist-assembler.1
 
 %if %{with check}
