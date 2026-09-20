@@ -55,6 +55,9 @@ The build script writes `abl-exorcist-assembler.1` to Cargo's `OUT_DIR`, normall
 `target/debug/build/abl-exorcist-assembler-*/out/`. The generated page is not
 stored in source control.
 
+Fedora/COPR packaging scaffolding is described in the
+[packaging draft](packaging/README.md).
+
 ## Hardware features
 
 All hardware-specific behavior is opt-in with Cargo features:
