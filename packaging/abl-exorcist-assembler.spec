@@ -54,7 +54,7 @@ install -Dpm0644 target/rpm/build/abl-exorcist-assembler-*/out/abl-exorcist-asse
 %cargo_test
 
 # Fedora patches zstd-sys to use the system shared library.
-# LZ4 compression is pure Rust through lz4_flex and has no shared library.
+# Draft: validate the native LZ4 backend packaging separately (see README.md).
 readelf -d target/rpm/abl-exorcist-assembler | grep -F 'libzstd.so.1'
 %endif
 
