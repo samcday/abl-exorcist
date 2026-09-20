@@ -10,13 +10,10 @@ name = "abl-exorcist-assembler"
 path = "src/main.rs"
 required-features = ["std"]
 
-[[example]]
-name = "manpage"
-required-features = ["std"]
-
 [features]
 default = ["std"]
 std = ["dep:clap", "dep:flate2", "dep:zstd"]
+manpage = ["std", "dep:clap_mangen"]
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"], optional = true }
@@ -24,5 +21,6 @@ flate2 = { version = "1.1", optional = true }
 lz4_flex = { version = "0.12.2", default-features = false, features = ["safe-encode", "safe-decode"] }
 zstd = { version = "0.13", optional = true }
 
-[dev-dependencies]
-clap_mangen = "0.3"
+[build-dependencies]
+clap = { version = "4.6", features = ["derive"], optional = true }
+clap_mangen = { version = "0.3", optional = true }
