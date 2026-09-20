@@ -4,14 +4,14 @@ version = 4
 
 [[package]]
 name = "abl-exorcist"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "lzzzz",
 ]
 
 [[package]]
 name = "abl-exorcist-assembler"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "flate2",
  "lzzzz",
