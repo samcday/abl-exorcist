@@ -43,6 +43,9 @@ raw LZ4 block. The original initramfs is appended unchanged. At boot, the shim
 decompresses the kernel and rewrites the FDT initrd range so Linux sees only the
 original initramfs.
 
+The assembler has a [crate README](abl-exorcist-assembler/README.md) and
+[manual page](abl-exorcist-assembler/abl-exorcist-assembler.1).
+
 ## Portable assembly library
 
 `assemble(kernel, shim)` and `assemble_ramdisk(kernel, initrd)` are available

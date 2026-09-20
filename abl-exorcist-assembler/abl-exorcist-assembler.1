@@ -1,0 +1,73 @@
+.TH ABL-EXORCIST-ASSEMBLER 1 "September 2026" "abl-exorcist-assembler 0.0.1" "User Commands"
+.SH NAME
+abl-exorcist-assembler \- construct mainline kernel payloads for abl-exorcist
+.SH SYNOPSIS
+.B abl-exorcist-assembler
+.I KERNEL SHIM
+> \fIOUTPUT\fR
+.br
+.B abl-exorcist-assembler --ramdisk
+.I KERNEL INITRD
+> \fIOUTPUT\fR
+.SH DESCRIPTION
+.B abl-exorcist-assembler
+is the host-side tool for constructing payloads consumed by the
+.B abl-exorcist
+AArch64 shim.
+It accepts a raw arm64 Image, a gzip- or zstd-compressed Image, or a Linux EFI
+zboot image and converts it to a validated raw arm64 Image before assembly.
+.PP
+The default mode appends a compressed kernel package to a raw
+device-appropriate shim.
+The
+.B --ramdisk
+mode emits an ABLXRD1 container holding the compressed kernel followed by the
+supplied initrd bytes.
+Both modes write the assembled binary to standard output.
+.PP
+Device selection, shim provenance, Android boot image geometry, partition
+writes, and flashing are outside this tool's scope.
+.SH OPTIONS
+.TP
+.BR -h ", " --help
+Print usage information and exit.
+.TP
+.BR -V ", " --version
+Print the program version and exit.
+.TP
+.B --ramdisk
+Build an ABLXRD1 external-initrd container instead of appending a package to a
+shim.
+.SH ARGUMENTS
+.TP
+.I KERNEL
+A raw arm64 Image, Image.gz, Image.zst, or Linux EFI zboot image.
+.TP
+.I SHIM
+A raw abl-exorcist arm64 Image built for the target device.
+.TP
+.I INITRD
+The initramfs bytes to place after the compressed kernel.
+.SH EXIT STATUS
+The command exits with status 0 on success and a nonzero status if an input is
+invalid or cannot be read, assembly fails, or standard output cannot be
+written.
+.SH EXAMPLES
+Append a kernel package to a shim:
+.PP
+.EX
+abl-exorcist-assembler vmlinuz abl-exorcist.bin > prepared-kernel
+.EE
+.PP
+Build the external-initrd transport used as an Android ramdisk:
+.PP
+.EX
+abl-exorcist-assembler --ramdisk vmlinuz initramfs.img > ablx-ramdisk.img
+.EE
+.SH SEE ALSO
+.BR dracut (8),
+.BR gzip (1),
+.BR zstd (1)
+.SH COPYRIGHT
+Copyright holders of the abl-exorcist project.
+Licensed under the GNU General Public License version 3.0 only.
