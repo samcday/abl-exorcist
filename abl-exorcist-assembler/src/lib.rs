@@ -59,6 +59,7 @@ pub enum AssembleError {
     ZeroImageSize { image: ImageKind },
     ShimTooLarge { len: u64, payload_offset: u64 },
     KernelLargerThanImageSize { len: u64, image_size: u64 },
+    EmptyInitrd,
     InvalidAlignment(u64),
     SizeOverflow(&'static str),
 }
@@ -85,6 +86,7 @@ impl fmt::Display for AssembleError {
                 f,
                 "kernel file length 0x{len:x} exceeds arm64 image_size 0x{image_size:x}"
             ),
+            Self::EmptyInitrd => f.write_str("initrd must not be empty"),
             Self::InvalidAlignment(alignment) => write!(
                 f,
                 "alignment must be a non-zero power of two: 0x{alignment:x}"
@@ -236,7 +238,11 @@ pub fn assemble(kernel: &[u8], shim: &[u8]) -> Result<Vec<u8>, AssembleError> {
 ///
 /// The kernel uses raw-block LZ4; the initrd is copied unchanged. Available with
 /// `no_std + alloc`; normalize compressed kernel inputs separately.
+/// Returns [`AssembleError::EmptyInitrd`] if the initrd is empty.
 pub fn assemble_ramdisk(kernel: &[u8], initrd: &[u8]) -> Result<Vec<u8>, AssembleError> {
+    if initrd.is_empty() {
+        return Err(AssembleError::EmptyInitrd);
+    }
     let kernel_size = arm64_image_size(kernel, ImageKind::Kernel)?;
     let kernel_file_len = u64::try_from(kernel.len())
         .map_err(|_| AssembleError::SizeOverflow("kernel file length"))?;
@@ -533,6 +539,15 @@ mod tests {
         let written = lz4_flex::block::decompress_into(compressed, &mut decompressed).unwrap();
         assert_eq!(written, kernel.len());
         assert_eq!(decompressed, kernel);
+    }
+
+    #[test]
+    fn ramdisk_rejects_empty_initrd() {
+        let kernel = image(0x2000, 256);
+        assert_eq!(
+            assemble_ramdisk(&kernel, &[]),
+            Err(AssembleError::EmptyInitrd)
+        );
     }
 
     #[test]
