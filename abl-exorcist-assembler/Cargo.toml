@@ -3,7 +3,14 @@ name = "abl-exorcist-assembler"
 version = "0.0.1"
 edition = "2024"
 license.workspace = true
-publish = false
+rust-version = "1.85"
+description = "Assemble mainline kernels and initrds for abl-exorcist Android boot payloads"
+repository = "https://github.com/samcday/abl-exorcist"
+homepage = "https://github.com/samcday/abl-exorcist"
+documentation = "https://docs.rs/abl-exorcist-assembler"
+readme = "README.md"
+keywords = ["android", "boot", "kernel", "aarch64"]
+categories = ["command-line-utilities", "embedded"]
 
 [features]
 default = ["std"]
