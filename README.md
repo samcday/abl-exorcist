@@ -43,13 +43,15 @@ raw LZ4 block. The original initramfs is appended unchanged. At boot, the shim
 decompresses the kernel and rewrites the FDT initrd range so Linux sees only the
 original initramfs.
 
-The assembler's [manual page](abl-exorcist-assembler/abl-exorcist-assembler.1)
-is generated from its clap command definition. Regenerate it after CLI changes:
+Generate the assembler's manual page from its clap command definition on demand:
 
 ```sh
-cargo run -p abl-exorcist-assembler --example manpage --locked \
-    > abl-exorcist-assembler/abl-exorcist-assembler.1
+cargo build -p abl-exorcist-assembler --features manpage --locked
 ```
+
+The build script writes `abl-exorcist-assembler.1` to Cargo's `OUT_DIR`, normally
+`target/debug/build/abl-exorcist-assembler-*/out/`. The generated page is not
+stored in source control.
 
 ## Hardware features
 
