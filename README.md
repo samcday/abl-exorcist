@@ -43,6 +43,44 @@ raw LZ4 block. The original initramfs is appended unchanged. At boot, the shim
 decompresses the kernel and rewrites the FDT initrd range so Linux sees only the
 original initramfs.
 
+## Portable assembly library
+
+`assemble(kernel, shim)` and `assemble_ramdisk(kernel, initrd)` are available
+with `no_std + alloc`. Both take an already-normalized raw ARM64 `Image` and
+return owned payload bytes:
+
+```toml
+abl-exorcist-assembler = { version = "0.0.1", default-features = false }
+```
+
+This is the intended dependency declaration for the first crates.io release;
+until it is published, use a path or pinned Git dependency.
+
+The default `std` feature additionally enables `canonicalize_kernel` for gzip,
+zstd and Linux EFI zboot inputs, and the host CLI. File I/O and kernel
+normalization are not required by either assembly function.
+
+Assembly uses portable raw-block LZ4 in every feature configuration. It no
+longer uses LZ4 HC, so compressed bytes and payload sizes can differ and the
+result may be larger. The `ABLXPKG1` and `ABLXRD1` formats and shim decoder are
+unchanged. Downstream size-limit evaluation and additional compression choices
+are follow-up work; this API currently selects LZ4 only.
+
+### Validation
+
+```sh
+cargo test --workspace --locked
+cargo test -p abl-exorcist-assembler --no-default-features --locked
+cargo test -p abl-exorcist --locked
+rustup target add wasm32-unknown-unknown aarch64-unknown-none
+cargo build --manifest-path tests/no-std-consumer/Cargo.toml --target wasm32-unknown-unknown --locked
+cargo build --manifest-path tests/no-std-consumer/Cargo.toml --target aarch64-unknown-none --locked
+```
+
+The shim tests decode both assembler outputs with the device's own LZ4 decoder.
+The separate `no_std` consumer calls both APIs without workspace feature
+unification, on wasm32 and on a target that has no standard library.
+
 ## Hardware features
 
 All hardware-specific behavior is opt-in with Cargo features:
