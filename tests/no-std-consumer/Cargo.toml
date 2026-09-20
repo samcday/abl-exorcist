@@ -1,0 +1,12 @@
+[package]
+name = "ablx-no-std-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Keep this consumer outside the main workspace so its dependency cannot gain
+# the std feature from the CLI or workspace tests through feature unification.
+[workspace]
+
+[dependencies]
+abl-exorcist-assembler = { path = "../../abl-exorcist-assembler", default-features = false }

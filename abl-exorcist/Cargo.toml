@@ -15,4 +15,4 @@ cache-sdm845-experiment = []
 bdaddr-google-sdm670 = []
 
 [dev-dependencies]
-lzzzz = "2.0"
+abl-exorcist-assembler = { path = "../abl-exorcist-assembler", version = "0.0.1", default-features = false }
