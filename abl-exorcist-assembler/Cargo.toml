@@ -8,7 +8,7 @@ description = "Assemble mainline kernels and initrds for abl-exorcist Android bo
 repository = "https://github.com/samcday/abl-exorcist"
 homepage = "https://github.com/samcday/abl-exorcist"
 documentation = "https://docs.rs/abl-exorcist-assembler"
-readme = "../README.md"
+readme = "README.md"
 keywords = ["android", "boot", "kernel", "aarch64"]
 categories = ["command-line-utilities", "embedded"]
 
