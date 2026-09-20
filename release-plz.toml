@@ -1,0 +1,9 @@
+[workspace]
+# Publish only after a release-plz PR is merged, never on an ordinary main commit.
+release_always = false
+# Only the assembler is part of this crates.io release flow.
+release = false
+
+[[package]]
+name = "abl-exorcist-assembler"
+release = true
