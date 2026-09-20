@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  assembler:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown, aarch64-unknown-none
+      - run: cargo fmt --all --check
+      - run: cargo fmt --manifest-path tests/no-std-consumer/Cargo.toml --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - run: cargo test -p abl-exorcist-assembler --no-default-features --locked
+      - name: Test shim decoder with the assembler's std feature disabled
+        run: cargo test -p abl-exorcist --locked
+      - name: Build a wasm32 consumer of both assembly functions
+        run: cargo build --manifest-path tests/no-std-consumer/Cargo.toml --target wasm32-unknown-unknown --locked
+      - name: Build the same consumer on a target without std
+        run: cargo build --manifest-path tests/no-std-consumer/Cargo.toml --target aarch64-unknown-none --locked
