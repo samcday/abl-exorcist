@@ -21,6 +21,10 @@ jobs:
       - run: cargo fmt --manifest-path tests/no-std-consumer/Cargo.toml --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - name: Check the generated manual page is current
+        run: |
+          cargo run -p abl-exorcist-assembler --example manpage --locked > "$RUNNER_TEMP/abl-exorcist-assembler.1"
+          diff -u abl-exorcist-assembler/abl-exorcist-assembler.1 "$RUNNER_TEMP/abl-exorcist-assembler.1"
       - run: cargo test -p abl-exorcist-assembler --no-default-features --locked
       - name: Test shim decoder with the assembler's std feature disabled
         run: cargo test -p abl-exorcist --locked

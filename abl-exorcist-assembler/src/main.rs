@@ -1,27 +1,15 @@
 use std::{
     fs,
     io::{self, BufWriter, Write},
-    path::{Path, PathBuf},
+    path::Path,
     process::ExitCode,
 };
 
 use clap::Parser;
 
-/// Assemble a kernel payload and write the binary image to stdout.
-#[derive(Parser)]
-#[command(version)]
-struct Cli {
-    /// Build an ABLX ramdisk container instead of a shim+kernel payload
-    #[arg(long)]
-    ramdisk: bool,
+mod cli;
 
-    /// Raw arm64 Image, Image.gz, Image.zst, or Linux EFI zboot image
-    kernel: PathBuf,
-
-    /// Raw abl-exorcist arm64 Image, or initramfs bytes with --ramdisk
-    #[arg(value_name = "SHIM_OR_INITRD")]
-    input: PathBuf,
-}
+use cli::Cli;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();

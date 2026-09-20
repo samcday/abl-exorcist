@@ -43,6 +43,14 @@ raw LZ4 block. The original initramfs is appended unchanged. At boot, the shim
 decompresses the kernel and rewrites the FDT initrd range so Linux sees only the
 original initramfs.
 
+The assembler's [manual page](abl-exorcist-assembler/abl-exorcist-assembler.1)
+is generated from its clap command definition. Regenerate it after CLI changes:
+
+```sh
+cargo run -p abl-exorcist-assembler --example manpage --locked \
+    > abl-exorcist-assembler/abl-exorcist-assembler.1
+```
+
 ## Portable assembly library
 
 `assemble(kernel, shim)` and `assemble_ramdisk(kernel, initrd)` are available
