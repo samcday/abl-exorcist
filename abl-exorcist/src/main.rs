@@ -2213,26 +2213,77 @@ mod tests {
     }
 
     #[test]
-    fn decompresses_lzzzz_raw_blocks() {
-        let inputs = [
+    fn decodes_assembler_kernel_and_ramdisk_containers() {
+        use abl_exorcist_assembler::{assemble, assemble_ramdisk};
+
+        fn read_u64(bytes: &[u8], offset: usize) -> usize {
+            u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+                .try_into()
+                .unwrap()
+        }
+
+        let mut random = vec![0; 65_537];
+        let mut state = 0x1234_5678u32;
+        for byte in &mut random {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            *byte = state as u8;
+        }
+        let kernels = [
+            vec![0; 64],
             vec![0; 4096],
             (0..65_537)
                 .map(|index| (index as u8).wrapping_mul(29).wrapping_add(7))
                 .collect(),
             b"pocketfed-ablx-".repeat(16_384),
+            random,
         ];
+        let mut shim = vec![0; 128];
+        shim[16..24].copy_from_slice(&4096u64.to_le_bytes());
+        shim[56..60].copy_from_slice(b"ARM\x64");
+        let initrd = b"opaque initrd bytes";
 
-        for input in inputs {
-            let mut compressed = Vec::new();
-            lzzzz::lz4_hc::compress_to_vec(&input, &mut compressed, lzzzz::lz4_hc::CLEVEL_MAX)
-                .unwrap();
-            let mut output = vec![0; input.len()];
+        for mut kernel in kernels {
+            let image_size = kernel.len() + 8192;
+            kernel[16..24].copy_from_slice(&(image_size as u64).to_le_bytes());
+            kernel[56..60].copy_from_slice(b"ARM\x64");
 
-            assert_eq!(
-                decompress_lz4_block(&compressed, &mut output),
-                Some(input.len())
-            );
-            assert_eq!(output, input);
+            let wrapped = assemble(&kernel, &shim).unwrap();
+            assert_eq!(&wrapped[..shim.len()], &shim);
+            let package = &wrapped[4096..];
+            assert_eq!(&package[..8], b"ABLXPKG1");
+            assert_eq!(&package[8..12], &48u32.to_le_bytes());
+            assert_eq!(&package[12..16], &2u32.to_le_bytes());
+            assert_eq!(read_u64(package, 24), kernel.len());
+            assert_eq!(read_u64(package, 32), image_size);
+            assert_eq!(package.len(), 48 + read_u64(package, 16));
+
+            let ramdisk = assemble_ramdisk(&kernel, initrd).unwrap();
+            assert_eq!(&ramdisk[..8], b"ABLXRD1\0");
+            assert_eq!(&ramdisk[8..12], &72u32.to_le_bytes());
+            assert_eq!(&ramdisk[12..16], &2u32.to_le_bytes());
+            let kernel_offset = read_u64(&ramdisk, 16);
+            let kernel_end = kernel_offset + read_u64(&ramdisk, 24);
+            let initrd_offset = read_u64(&ramdisk, 48);
+            assert_eq!(kernel_offset % 4096, 0);
+            assert_eq!(initrd_offset % 4096, 0);
+            assert!(kernel_end <= initrd_offset);
+            assert_eq!(read_u64(&ramdisk, 32), kernel.len());
+            assert_eq!(read_u64(&ramdisk, 40), image_size);
+            assert_eq!(read_u64(&ramdisk, 56), initrd.len());
+            assert_eq!(&ramdisk[initrd_offset..], initrd);
+
+            for compressed in [&package[48..], &ramdisk[kernel_offset..kernel_end]] {
+                let mut output = vec![0; kernel.len()];
+                // Exercise the exact decoder used by the device shim, not the
+                // compressor's own decoder or a copied implementation.
+                assert_eq!(
+                    decompress_lz4_block(compressed, &mut output),
+                    Some(kernel.len())
+                );
+                assert_eq!(output, kernel);
+            }
         }
     }
 
