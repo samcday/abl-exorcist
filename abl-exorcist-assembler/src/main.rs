@@ -20,6 +20,14 @@ fn run() -> Result<(), String> {
     let first = args
         .next()
         .ok_or_else(|| usage("missing kernel image path or mode"))?;
+    if first == "--help" || first == "-h" {
+        println!("{}", help());
+        return Ok(());
+    }
+    if first == "--version" || first == "-V" {
+        println!("abl-exorcist-assembler {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     if first == "--ramdisk" {
         return run_ramdisk(args);
     }
@@ -78,7 +86,9 @@ fn run_ramdisk(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<(),
 }
 
 fn usage(error: &str) -> String {
-    format!(
-        "{error}\nusage: abl-exorcist-assembler /path/to/kernel /path/to/abl-exorcist.bin > /path/to/prepared-abl-exorcist-plus-kernel\n       abl-exorcist-assembler --ramdisk /path/to/kernel /path/to/initrd > /path/to/ablx-ramdisk-container"
-    )
+    format!("{error}\n\n{}", help())
+}
+
+fn help() -> &'static str {
+    "Usage:\n  abl-exorcist-assembler <KERNEL> <SHIM> > <OUTPUT>\n  abl-exorcist-assembler --ramdisk <KERNEL> <INITRD> > <OUTPUT>\n\nInputs:\n  KERNEL  raw arm64 Image, Image.gz, Image.zst, or Linux EFI zboot image\n  SHIM    raw abl-exorcist arm64 Image\n  INITRD  initramfs bytes to place after the compressed kernel\n\nOptions:\n  -h, --help     Print help\n  -V, --version  Print version"
 }
