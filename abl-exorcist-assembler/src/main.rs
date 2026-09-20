@@ -1,12 +1,36 @@
 use std::{
-    env, fs,
+    fs,
     io::{self, BufWriter, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::ExitCode,
 };
 
+use clap::Parser;
+
+/// Assemble a kernel payload and write the binary image to stdout.
+#[derive(Parser)]
+#[command(version)]
+struct Cli {
+    /// Build an ABLX ramdisk container instead of a shim+kernel payload
+    #[arg(long)]
+    ramdisk: bool,
+
+    /// Raw arm64 Image, Image.gz, Image.zst, or Linux EFI zboot image
+    kernel: PathBuf,
+
+    /// Raw abl-exorcist arm64 Image, or initramfs bytes with --ramdisk
+    #[arg(value_name = "SHIM_OR_INITRD")]
+    input: PathBuf,
+}
+
 fn main() -> ExitCode {
-    match run() {
+    let cli = Cli::parse();
+    let result = if cli.ramdisk {
+        run_ramdisk(&cli.kernel, &cli.input)
+    } else {
+        run(&cli.kernel, &cli.input)
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("error: {err}");
@@ -15,27 +39,9 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<(), String> {
-    let mut args = env::args_os().skip(1);
-    let first = args
-        .next()
-        .ok_or_else(|| usage("missing kernel image path or mode"))?;
-    if first == "--ramdisk" {
-        return run_ramdisk(args);
-    }
-
-    let kernel = first;
-    let shim = args
-        .next()
-        .ok_or_else(|| usage("missing abl-exorcist image path"))?;
-    if args.next().is_some() {
-        return Err(usage("too many arguments"));
-    }
-
-    let kernel =
-        fs::read(&kernel).map_err(|err| format!("read {}: {err}", Path::new(&kernel).display()))?;
-    let shim =
-        fs::read(&shim).map_err(|err| format!("read {}: {err}", Path::new(&shim).display()))?;
+fn run(kernel: &Path, shim: &Path) -> Result<(), String> {
+    let kernel = fs::read(kernel).map_err(|err| format!("read {}: {err}", kernel.display()))?;
+    let shim = fs::read(shim).map_err(|err| format!("read {}: {err}", shim.display()))?;
     let kernel =
         abl_exorcist_assembler::canonicalize_kernel(&kernel).map_err(|err| err.to_string())?;
     let assembled =
@@ -49,21 +55,9 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
-fn run_ramdisk(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<(), String> {
-    let kernel = args
-        .next()
-        .ok_or_else(|| usage("missing kernel image path"))?;
-    let initrd = args
-        .next()
-        .ok_or_else(|| usage("missing initrd image path"))?;
-    if args.next().is_some() {
-        return Err(usage("too many arguments"));
-    }
-
-    let kernel =
-        fs::read(&kernel).map_err(|err| format!("read {}: {err}", Path::new(&kernel).display()))?;
-    let initrd =
-        fs::read(&initrd).map_err(|err| format!("read {}: {err}", Path::new(&initrd).display()))?;
+fn run_ramdisk(kernel: &Path, initrd: &Path) -> Result<(), String> {
+    let kernel = fs::read(kernel).map_err(|err| format!("read {}: {err}", kernel.display()))?;
+    let initrd = fs::read(initrd).map_err(|err| format!("read {}: {err}", initrd.display()))?;
     let kernel =
         abl_exorcist_assembler::canonicalize_kernel(&kernel).map_err(|err| err.to_string())?;
     let assembled = abl_exorcist_assembler::assemble_ramdisk(&kernel, &initrd)
@@ -75,10 +69,4 @@ fn run_ramdisk(mut args: impl Iterator<Item = std::ffi::OsString>) -> Result<(),
         .map_err(|err| format!("write ramdisk container to stdout: {err}"))?;
     out.flush().map_err(|err| format!("flush stdout: {err}"))?;
     Ok(())
-}
-
-fn usage(error: &str) -> String {
-    format!(
-        "{error}\nusage: abl-exorcist-assembler /path/to/kernel /path/to/abl-exorcist.bin > /path/to/prepared-abl-exorcist-plus-kernel\n       abl-exorcist-assembler --ramdisk /path/to/kernel /path/to/initrd > /path/to/ablx-ramdisk-container"
-    )
 }
